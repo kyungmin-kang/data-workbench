@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Data Workbench</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <p class="eyebrow">Data Workbench</p>
+          <h1>Data Workbench</h1>
+        </div>
+        <div class="topbar-controls">
+          <label>
+            View
+            <select id="view-select">
+              <option value="data">Data View</option>
+              <option value="contract">Contract View</option>
+              <option value="ui">UI Dependency View</option>
+              <option value="impact">Impact View</option>
+            </select>
+          </label>
+          <label>
+            Impact Scope
+            <select id="impact-direction-select">
+              <option value="both">Both</option>
+              <option value="upstream">Upstream</option>
+              <option value="downstream">Downstream</option>
+            </select>
+          </label>
+          <button id="save-button" class="primary" type="button">Save -> Plan</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section id="canvas-panel" class="canvas-panel">
+          <div class="canvas-header" hidden aria-hidden="true">
+            <div>
+              <strong id="status-text">Loading graph...</strong>
+              <p id="substatus-text">One underlying graph, filtered into focused views.</p>
+            </div>
+            <div class="canvas-header-actions"></div>
+          </div>
+          <div class="canvas-toolbar">
+            <div class="toolbar-actions toolbar-actions-primary">
+              <button id="undo-button" class="icon-button" type="button" title="Undo">&#8630;</button>
+              <button id="redo-button" class="icon-button" type="button" title="Redo">&#8631;</button>
+            </div>
+            <div id="interaction-mode-toggle" class="mode-toggle" role="tablist" aria-label="Interaction mode">
+              <button id="inspect-mode-button" class="mode-toggle-button" type="button">Inspect</button>
+              <button id="edit-mode-button" class="mode-toggle-button" type="button">Edit</button>
+            </div>
+            <div class="zoom-controls">
+              <button id="zoom-out-button" type="button">-</button>
+              <label class="zoom-input-wrap">
+                <input id="zoom-input" type="number" min="25" max="225" step="5" value="100" />
+                <span>%</span>
+              </label>
+              <button id="zoom-in-button" type="button">+</button>
+              <button id="zoom-reset-button" type="button">Reset</button>
+            </div>
+            <label class="toolbar-toggle" for="graph-detail-toggle">
+              <input id="graph-detail-toggle" type="checkbox" />
+              <span>Details</span>
+            </label>
+            <button id="graph-add-object-button" type="button">Add object</button>
+            <button id="remove-selection-button" class="danger-soft" type="button">Remove selected</button>
+            <button id="center-selection-button" type="button">Center Selection</button>
+            <button id="clear-filters-button" type="button">Reset View</button>
+            <button id="fullscreen-button" type="button">Full screen</button>
+            <button id="authoring-drawer-toggle" type="button">Add / Import</button>
+            <details class="toolbar-more">
+              <summary>More</summary>
+              <div class="toolbar-more-panel">
+                <label class="toolbar-field grow">
+                  Search
+                  <input id="search-input" type="search" placeholder="Search by id, label, owner, or description" />
+                </label>
+                <label class="toolbar-field">
+                  Kind Filter
+                  <select id="kind-filter-select">
+                    <option value="all">All</option>
+                    <option value="source">Source</option>
+                    <option value="data">Data</option>
+                    <option value="compute">Compute</option>
+                    <option value="contract">Contract</option>
+                  </select>
+                </label>
+                <div class="toolbar-actions">
+                  <button id="project-profile-button" type="button">Discover Project</button>
+                  <button id="validate-button" type="button">Validate Graph</button>
+                  <button id="refresh-button" type="button">Refresh Profiles</button>
+                </div>
+              </div>
+            </details>
+            <div class="toolbar-stats">
+              <span id="visible-count" class="status-pill">0 nodes / 0 edges</span>
+              <span id="dirty-indicator" class="status-pill">All changes saved</span>
+            </div>
+          </div>
+          <div id="graph-add-panel" class="graph-add-panel" hidden>
+            <div class="graph-add-panel-head">
+              <strong>Add object</strong>
+              <button id="graph-add-panel-close" class="icon-button small" type="button" title="Close add object">x</button>
+            </div>
+            <div class="graph-add-panel-body">
+              <label class="toolbar-field">
+                Kind
+                <select id="graph-add-kind-select">
+                  <option value="source">Source</option>
+                  <option value="data">Data</option>
+                  <option value="compute">Compute</option>
+                  <option value="contract">Contract</option>
+                </select>
+              </label>
+              <label class="toolbar-field">
+                Type
+                <select id="graph-add-type-select"></select>
+              </label>
+              <label class="toolbar-field grow">
+                Label
+                <input id="graph-add-label-input" type="text" placeholder="Pricing Features" />
+              </label>
+              <label class="toolbar-field grow">
+                Description
+                <input id="graph-add-description-input" type="text" placeholder="Optional note for the new object" />
+              </label>
+              <div class="graph-add-panel-actions">
+                <span id="graph-link-selection-summary" class="status-pill">No columns picked</span>
+                <button id="graph-link-selection-clear" class="ghost-button" type="button">Clear picked</button>
+                <button id="graph-add-submit-button" class="primary" type="button">Create object</button>
+              </div>
+            </div>
+          </div>
+          <div class="canvas-workspace">
+            <div class="graph-stage">
+              <div id="graph-legend-panel" class="graph-legend-panel">
+                <div class="graph-legend-header" data-legend-drag="true">
+                  <strong>Legend</strong>
+                  <button id="graph-legend-toggle" class="icon-button small" type="button" title="Collapse legend">+</button>
+                </div>
+                <div id="graph-legend-body" class="graph-legend-body">
+                  <div class="legend legend-sections">
+                    <span class="legend-chip source">source</span>
+                    <span class="legend-chip compute">compute</span>
+                    <span class="legend-chip data">data</span>
+                    <span class="legend-chip contract">contract</span>
+                  </div>
+                  <div class="legend legend-sections">
+                    <span class="legend-chip trace">tracked columns</span>
+                    <span class="legend-chip lineage">connected lineage</span>
+                    <span class="legend-chip selected">selected node</span>
+                  </div>
+                  <div id="active-trace-legend" class="legend legend-sections"></div>
+                  <div class="legend legend-sections">
+                    <span class="legend-chip storage-db">database-backed</span>
+                    <span class="legend-chip storage-file">raw flat file</span>
+                    <span class="legend-chip storage-api">API / web source</span>
+                    <span class="legend-chip storage-object">object storage</span>
+                  </div>
+                </div>
+              </div>
+              <div id="graph-scroller" class="graph-scroller">
+                <div id="graph-viewport" class="graph-viewport">
+                  <svg id="graph-edges" class="graph-edges"></svg>
+                  <div id="graph-canvas" class="graph-canvas"></div>
+                </div>
+              </div>
+              <div id="graph-context-menu" class="graph-context-menu" hidden></div>
+            </div>
+            <aside id="inspector-panel" class="inspector-panel">
+              <div class="inspector-header">
+                <h2 id="detail-heading">Selection Details</h2>
+                <span id="inspector-mode-pill" class="status-pill">Inspect</span>
+              </div>
+              <div id="node-detail">
+                <p>Select a node to inspect dependencies and health.</p>
+              </div>
+            </aside>
+          </div>
+          <aside id="authoring-drawer" class="authoring-drawer" hidden>
+            <div class="authoring-drawer-head">
+              <h2>Add / Import</h2>
+              <button id="authoring-drawer-close" class="icon-button small" type="button" title="Close add and import drawer">x</button>
+            </div>
+            <div id="authoring-panel">
+              <p>Loading authoring tools...</p>
+            </div>
+          </aside>
+        </section>
+
+        <section class="detail-panel detail-panel-summary">
+          <section class="panel-card">
+            <h2>Structure Memory</h2>
+            <div id="structure-summary">
+              <p>Loading structure memory...</p>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <h2>Latest Plan</h2>
+            <div id="plan-summary">
+              <p>No save plan has been generated yet.</p>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <h2>Graph Checks</h2>
+            <div id="validation-summary">
+              <p>No validation report yet.</p>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <h2>Project Discovery</h2>
+            <div id="project-profile-summary">
+              <p>No project discovery has been run yet.</p>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <template id="column-row-template">
+      <div class="column-row">
+        <div class="column-main"></div>
+        <div class="column-meta"></div>
+      </div>
+    </template>
+
+    <div id="confirm-modal" class="overlay-modal" hidden>
+      <div class="overlay-modal-backdrop" data-modal-close="confirm"></div>
+      <div class="overlay-modal-card">
+        <div class="overlay-modal-head">
+          <h2 id="confirm-modal-title">Confirm removal</h2>
+        </div>
+        <p id="confirm-modal-message" class="hint">This action cannot be undone from the graph.</p>
+        <div class="confirm-modal-body">
+          <label class="inline-checkbox confirm-inline-option">
+            <input id="confirm-modal-snooze-check" type="checkbox" />
+            <span>Turn off this warning temporarily</span>
+          </label>
+          <label class="form-field confirm-select-row">
+            Snooze for
+            <select id="confirm-modal-snooze-minutes">
+              <option value="1">1 minute</option>
+              <option value="5">5 minutes</option>
+            </select>
+          </label>
+        </div>
+        <div class="section-actions">
+          <button id="confirm-modal-cancel" class="ghost-button" type="button">Cancel</button>
+          <button id="confirm-modal-ok" class="inline-button danger" type="button">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="directory-picker-modal" class="overlay-modal" hidden>
+      <div class="overlay-modal-backdrop" data-modal-close="directory"></div>
+      <div class="overlay-modal-card overlay-modal-card-wide">
+        <div class="overlay-modal-head">
+          <h2>Select Project Root</h2>
+          <button id="directory-picker-close" class="icon-button small" type="button" title="Close directory picker">x</button>
+        </div>
+        <div class="form-grid compact">
+          <label class="form-field form-field-full">
+            Search directories
+            <input id="directory-picker-query" type="search" placeholder="Type part of a folder name or path" />
+          </label>
+        </div>
+        <div class="section-actions">
+          <button id="directory-picker-search" class="ghost-button" type="button">Search</button>
+          <button id="directory-picker-use-current" class="ghost-button" type="button">Use current workspace</button>
+        </div>
+        <div id="directory-picker-results" class="column-list"></div>
+      </div>
+    </div>
+
+    <div id="node-peek-tooltip" class="node-peek-tooltip"></div>
+    
+    <dialog id="command-palette" class="command-palette-dialog">
+      <input type="text" id="command-palette-input" class="command-palette-input" placeholder="Search nodes or commands..." autocomplete="off" spellcheck="false" />
+      <div id="command-palette-results" class="command-palette-results"></div>
+    </dialog>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>

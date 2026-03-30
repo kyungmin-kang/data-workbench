@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+.DS_Store
+.playwright-browsers/
+runtime/cache/*
+runtime/plans/*
+!runtime/cache/.gitkeep
+!runtime/plans/.gitkeep

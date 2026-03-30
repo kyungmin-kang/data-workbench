@@ -1,0 +1,2948 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "Data Workbench Demo Graph",
+    "description": "Canonical graph for the Data Workbench demo.",
+    "updated_at": "2026-03-28T04:46:00+00:00",
+    "updated_by": "migration",
+    "structure_version": 1
+  },
+  "nodes": [
+    {
+      "id": "compute:model.pricing_v1",
+      "kind": "compute",
+      "extension_type": "model",
+      "label": "Pricing Model v1",
+      "description": "Internal model for pricing pressure signals.",
+      "tags": [],
+      "owner": "data-science",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 480.0,
+        "y": 700.0
+      },
+      "columns": [
+        {
+          "id": "field.model_pricing_v1.pricing_score",
+          "name": "pricing_score",
+          "description": "",
+          "required": true,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": [
+            {
+              "field_id": "field.market_signals.median_home_price",
+              "role": "feature_input"
+            },
+            {
+              "field_id": "field.market_signals.rent_index",
+              "role": "feature_input"
+            },
+            {
+              "field_id": "field.pricing_features.macro_momentum",
+              "role": "feature_input"
+            },
+            {
+              "field_id": "field.pricing_features.rent_pressure",
+              "role": "feature_input"
+            }
+          ]
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "python",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [
+          {
+            "field_id": "field.market_signals.median_home_price",
+            "column_ref": "data:market_signals.median_home_price",
+            "status": "selected",
+            "persisted": true,
+            "stage": "training_and_inference",
+            "category": "building_level",
+            "labels": [
+              "pricing",
+              "core",
+              "building"
+            ],
+            "order": 10,
+            "confidence": "medium",
+            "evidence": []
+          },
+          {
+            "field_id": "field.market_signals.rent_index",
+            "column_ref": "data:market_signals.rent_index",
+            "status": "selected",
+            "persisted": true,
+            "stage": "training_and_inference",
+            "category": "transaction_context",
+            "labels": [
+              "market",
+              "transaction",
+              "rent"
+            ],
+            "order": 20,
+            "confidence": "medium",
+            "evidence": []
+          },
+          {
+            "field_id": "field.pricing_features.macro_momentum",
+            "column_ref": "data:pricing_features.macro_momentum",
+            "status": "candidate",
+            "persisted": false,
+            "stage": "training_only",
+            "category": "market_momentum",
+            "labels": [
+              "macro",
+              "derived",
+              "experimental"
+            ],
+            "order": 30,
+            "confidence": "medium",
+            "evidence": []
+          },
+          {
+            "field_id": "field.pricing_features.rent_pressure",
+            "column_ref": "data:pricing_features.rent_pressure",
+            "status": "candidate",
+            "persisted": false,
+            "stage": "training_only",
+            "category": "market_momentum",
+            "labels": [
+              "rent",
+              "derived",
+              "experimental"
+            ],
+            "order": 40,
+            "confidence": "medium",
+            "evidence": []
+          }
+        ],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "compute:transform.feature_builder",
+      "kind": "compute",
+      "extension_type": "transform",
+      "label": "Build Pricing Features",
+      "description": "Builds transient pricing features from raw home price and rent series.",
+      "tags": [],
+      "owner": "data-science",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 480.0,
+        "y": 864.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "polars",
+        "inputs": [
+          "data:fred_home_price_raw",
+          "data:fred_rent_index_raw"
+        ],
+        "outputs": [
+          "data:pricing_features"
+        ],
+        "notes": "Derives transient model features directly from raw market series.",
+        "feature_selection": [],
+        "column_mappings": [
+          {
+            "source_field_id": "field.fred_home_price_raw.price_index",
+            "target_field_id": "field.pricing_features.macro_momentum",
+            "source": "data:fred_home_price_raw.price_index",
+            "target": "data:pricing_features.macro_momentum"
+          },
+          {
+            "source_field_id": "field.fred_rent_index_raw.rent_index",
+            "target_field_id": "field.pricing_features.rent_pressure",
+            "source": "data:fred_rent_index_raw.rent_index",
+            "target": "data:pricing_features.rent_pressure"
+          }
+        ]
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "compute:transform.market_inputs",
+      "kind": "compute",
+      "extension_type": "transform",
+      "label": "Normalize Market Inputs",
+      "description": "Combines FRED series and shadow inventory into one market signal table.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 480.0,
+        "y": 92.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "polars",
+        "inputs": [
+          "data:fred_home_price_raw",
+          "data:fred_rent_index_raw",
+          "data:shadow_inventory_raw"
+        ],
+        "outputs": [
+          "data:market_signals"
+        ],
+        "notes": "Align monthly series and standardize dates.",
+        "feature_selection": [],
+        "column_mappings": [
+          {
+            "source_field_id": "field.fred_home_price_raw.price_index",
+            "target_field_id": "field.market_signals.median_home_price",
+            "source": "data:fred_home_price_raw.price_index",
+            "target": "data:market_signals.median_home_price"
+          },
+          {
+            "source_field_id": "field.fred_rent_index_raw.rent_index",
+            "target_field_id": "field.market_signals.rent_index",
+            "source": "data:fred_rent_index_raw.rent_index",
+            "target": "data:market_signals.rent_index"
+          },
+          {
+            "source_field_id": "field.shadow_inventory_raw.shadow_inventory_index",
+            "target_field_id": "field.market_signals.shadow_inventory_index",
+            "source": "data:shadow_inventory_raw.shadow_inventory_index",
+            "target": "data:market_signals.shadow_inventory_index"
+          }
+        ]
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:api.frontend_market_signals",
+      "kind": "contract",
+      "extension_type": "api",
+      "label": "Frontend Market Signals API",
+      "description": "Frontend-facing API contract backed directly by the Market Signals serving table.",
+      "tags": [],
+      "owner": "backend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 2592.0,
+        "y": 700.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "GET /api/frontend/market-signals",
+        "component": "",
+        "ui_role": "",
+        "fields": [
+          {
+            "id": "field.api_frontend_market_signals.median_home_price",
+            "name": "median_home_price",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.market_signals.median_home_price",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "data:market_signals",
+                "column": "median_home_price"
+              }
+            ],
+            "binding_locked": false
+          },
+          {
+            "id": "field.api_frontend_market_signals.rent_index",
+            "name": "rent_index",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.fred_rent_index_raw.rent_index",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "data:fred_rent_index_raw",
+                "column": "rent_index"
+              }
+            ],
+            "binding_locked": false
+          },
+          {
+            "id": "field.api_frontend_market_signals.shadow_inventory_index",
+            "name": "shadow_inventory_index",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.market_signals.shadow_inventory_index",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "data:market_signals",
+                "column": "shadow_inventory_index"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:api.market_snapshot",
+      "kind": "contract",
+      "extension_type": "api",
+      "label": "Market Snapshot API",
+      "description": "Backend contract for market summary data.",
+      "tags": [],
+      "owner": "backend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 2592.0,
+        "y": 92.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "GET /api/markets/snapshot",
+        "component": "",
+        "ui_role": "",
+        "fields": [
+          {
+            "id": "field.api_market_snapshot.median_home_price",
+            "name": "median_home_price",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.market_signals.median_home_price",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "data:market_signals",
+                "column": "median_home_price"
+              }
+            ],
+            "binding_locked": false
+          },
+          {
+            "id": "field.api_market_snapshot.pricing_score",
+            "name": "pricing_score",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.model_pricing_v1.pricing_score",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "compute:model.pricing_v1",
+                "column": "pricing_score"
+              }
+            ],
+            "binding_locked": false
+          },
+          {
+            "id": "field.api_market_snapshot.shadow_inventory_index",
+            "name": "shadow_inventory_index",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.market_signals.shadow_inventory_index",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "data:market_signals",
+                "column": "shadow_inventory_index"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.hero_median_card",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "HeroMedianCard",
+      "description": "Leaf UI component that renders the hero median home price value.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 864.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "HeroMedianCard",
+        "ui_role": "component",
+        "fields": [
+          {
+            "id": "field.ui_hero_median_card.heromedianprice",
+            "name": "heroMedianPrice",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.api_frontend_market_signals.median_home_price",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "contract:api.frontend_market_signals",
+                "field": "median_home_price"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.inventory_chip",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "InventoryChip",
+      "description": "Leaf UI component that renders the shadow inventory chip.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 1192.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "InventoryChip",
+        "ui_role": "component",
+        "fields": [
+          {
+            "id": "field.ui_inventory_chip.inventorychip",
+            "name": "inventoryChip",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.api_frontend_market_signals.shadow_inventory_index",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "contract:api.frontend_market_signals",
+                "field": "shadow_inventory_index"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.market_dashboard",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "Market Dashboard UI",
+      "description": "Screen-level dashboard shell for market pages.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 92.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "MarketDashboard",
+        "ui_role": "screen",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.market_overview_strip",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "Market Overview Strip",
+      "description": "Container that groups the market summary cards fed by shared APIs.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 700.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "MarketOverviewStrip",
+        "ui_role": "container",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.pricing_score_card",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "PricingScoreCard",
+      "description": "Leaf UI component that renders the pricing score card.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 1356.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "PricingScoreCard",
+        "ui_role": "component",
+        "fields": [
+          {
+            "id": "field.ui_pricing_score_card.pricingscorecard",
+            "name": "pricingScoreCard",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.api_market_snapshot.pricing_score",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "contract:api.market_snapshot",
+                "field": "pricing_score"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "contract:ui.rent_trend_chip",
+      "kind": "contract",
+      "extension_type": "ui",
+      "label": "RentTrendChip",
+      "description": "Leaf UI component that renders the rent trend chip.",
+      "tags": [],
+      "owner": "frontend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 3064.0,
+        "y": 1028.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "RentTrendChip",
+        "ui_role": "component",
+        "fields": [
+          {
+            "id": "field.ui_rent_trend_chip.renttrendchip",
+            "name": "rentTrendChip",
+            "description": "",
+            "required": true,
+            "state": "confirmed",
+            "verification_state": "confirmed",
+            "confidence": "high",
+            "evidence": [],
+            "last_verified_by": "",
+            "last_verified_at": "",
+            "history": [],
+            "removed": false,
+            "removed_at": "",
+            "removed_by": "",
+            "derived_from": [],
+            "replaces": [],
+            "primary_binding": "field.api_frontend_market_signals.rent_index",
+            "alternatives": [],
+            "sources": [
+              {
+                "node_id": "contract:api.frontend_market_signals",
+                "field": "rent_index"
+              }
+            ],
+            "binding_locked": false
+          }
+        ]
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "data:fred_home_price_raw",
+      "kind": "data",
+      "extension_type": "raw_dataset",
+      "label": "FRED Home Price Raw",
+      "description": "Raw FRED home price series landing dataset.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "profiled",
+      "notes": "",
+      "position": {
+        "x": 924.0,
+        "y": 92.0
+      },
+      "columns": [
+        {
+          "id": "field.fred_home_price_raw.date",
+          "name": "date",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "date",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "2025-05-01",
+            "mode_count": 1,
+            "top_values": [
+              [
+                "2025-05-01",
+                1
+              ],
+              [
+                "2025-02-01",
+                1
+              ],
+              [
+                "2025-01-01",
+                1
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.fred_home_price_raw.metro",
+          "name": "metro",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "string",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "New York",
+            "mode_count": 5,
+            "top_values": [
+              [
+                "New York",
+                5
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.fred_home_price_raw.price_index",
+          "name": "price_index",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mean": 249.26,
+            "std": 1.7155,
+            "min": 247.1,
+            "max": 251.6
+          },
+          "notes": "",
+          "lineage_inputs": []
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "cold",
+        "local_path": "",
+        "update_frequency": "monthly",
+        "persisted": false,
+        "row_count": 5,
+        "sampled": false,
+        "profile_target": "data/demo/fred_home_price.csv"
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "data:fred_rent_index_raw",
+      "kind": "data",
+      "extension_type": "raw_dataset",
+      "label": "FRED Rent Index Raw",
+      "description": "Raw FRED rent series landing dataset.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "profiled",
+      "notes": "",
+      "position": {
+        "x": 924.0,
+        "y": 700.0
+      },
+      "columns": [
+        {
+          "id": "field.fred_rent_index_raw.date",
+          "name": "date",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "date",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "2025-03-01",
+            "mode_count": 1,
+            "top_values": [
+              [
+                "2025-03-01",
+                1
+              ],
+              [
+                "2025-05-01",
+                1
+              ],
+              [
+                "2025-04-01",
+                1
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.fred_rent_index_raw.metro",
+          "name": "metro",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "string",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "New York",
+            "mode_count": 5,
+            "top_values": [
+              [
+                "New York",
+                5
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.fred_rent_index_raw.rent_index",
+          "name": "rent_index",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mean": 133.6,
+            "std": 0.9407,
+            "min": 132.4,
+            "max": 134.7
+          },
+          "notes": "",
+          "lineage_inputs": []
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "cold",
+        "local_path": "",
+        "update_frequency": "monthly",
+        "persisted": false,
+        "row_count": 5,
+        "sampled": false,
+        "profile_target": "data/demo/fred_rent_index.csv"
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "data:market_signals",
+      "kind": "data",
+      "extension_type": "table",
+      "label": "Market Signals",
+      "description": "Curated serving table for market factors.",
+      "tags": [],
+      "owner": "backend",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 2008.0,
+        "y": 92.0
+      },
+      "columns": [
+        {
+          "id": "field.market_signals.add",
+          "name": "add",
+          "description": "add",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "string",
+          "nullable": true,
+          "null_pct": null,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": [],
+          "category": "",
+          "labels": [],
+          "__isNew": true
+        },
+        {
+          "id": "field.market_signals.date",
+          "name": "date",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "date",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.market_signals.median_home_price",
+          "name": "median_home_price",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.market_signals.rent_index",
+          "name": "rent_index",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.market_signals.shadow_inventory_index",
+          "name": "shadow_inventory_index",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "hot",
+        "local_path": "",
+        "update_frequency": "daily",
+        "persisted": true,
+        "row_count": null,
+        "sampled": false,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "data:pricing_features",
+      "kind": "data",
+      "extension_type": "feature_set",
+      "label": "Pricing Features",
+      "description": "Transient feature set used by the pricing model.",
+      "tags": [],
+      "owner": "data-science",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 1396.0,
+        "y": 92.0
+      },
+      "columns": [
+        {
+          "id": "field.pricing_features.macro_momentum",
+          "name": "macro_momentum",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": true,
+          "null_pct": null,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.pricing_features.rent_pressure",
+          "name": "rent_pressure",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": true,
+          "null_pct": null,
+          "stats": {},
+          "notes": "",
+          "lineage_inputs": []
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "transient",
+        "local_path": "",
+        "update_frequency": "daily",
+        "persisted": false,
+        "row_count": null,
+        "sampled": false,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "data:shadow_inventory_raw",
+      "kind": "data",
+      "extension_type": "raw_dataset",
+      "label": "Shadow Inventory Raw",
+      "description": "Local CSV landing dataset for inventory signals.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "profiled",
+      "notes": "",
+      "position": {
+        "x": 924.0,
+        "y": 864.0
+      },
+      "columns": [
+        {
+          "id": "field.shadow_inventory_raw.borough",
+          "name": "borough",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "string",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "Manhattan",
+            "mode_count": 5,
+            "top_values": [
+              [
+                "Manhattan",
+                5
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.shadow_inventory_raw.date",
+          "name": "date",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "date",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mode": "2025-05-01",
+            "mode_count": 1,
+            "top_values": [
+              [
+                "2025-05-01",
+                1
+              ],
+              [
+                "2025-04-01",
+                1
+              ],
+              [
+                "2025-02-01",
+                1
+              ]
+            ]
+          },
+          "notes": "",
+          "lineage_inputs": []
+        },
+        {
+          "id": "field.shadow_inventory_raw.shadow_inventory_index",
+          "name": "shadow_inventory_index",
+          "description": "",
+          "required": false,
+          "state": "confirmed",
+          "verification_state": "confirmed",
+          "confidence": "high",
+          "evidence": [],
+          "last_verified_by": "",
+          "last_verified_at": "",
+          "history": [],
+          "removed": false,
+          "removed_at": "",
+          "removed_by": "",
+          "derived_from": [],
+          "replaces": [],
+          "data_type": "float",
+          "nullable": false,
+          "null_pct": 0.0,
+          "stats": {
+            "mean": 43.16,
+            "std": 1.5469,
+            "min": 41,
+            "max": 45.1
+          },
+          "notes": "",
+          "lineage_inputs": []
+        }
+      ],
+      "source": {
+        "provider": "",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "cold",
+        "local_path": "data/demo/shadow_inventory.csv",
+        "update_frequency": "weekly",
+        "persisted": false,
+        "row_count": 5,
+        "sampled": false,
+        "profile_target": "data/demo/shadow_inventory.csv"
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "source:fred",
+      "kind": "source",
+      "extension_type": "provider",
+      "label": "FRED",
+      "description": "Federal Reserve Economic Data provider.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 36.0,
+        "y": 700.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "FRED",
+        "origin": {
+          "kind": "url",
+          "value": "https://fred.stlouisfed.org/"
+        },
+        "refresh": "monthly",
+        "shared_config": {
+          "format": "json",
+          "transport": "https"
+        },
+        "series_id": "",
+        "data_dictionaries": [
+          {
+            "label": "FRED API Docs",
+            "kind": "link",
+            "value": "https://fred.stlouisfed.org/docs/api/fred/"
+          }
+        ],
+        "raw_assets": []
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "source:fred.home_price_series",
+      "kind": "source",
+      "extension_type": "object",
+      "label": "NYXRSA",
+      "description": "NY home price index series.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 36.0,
+        "y": 92.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "FRED",
+        "origin": {
+          "kind": "api_endpoint",
+          "value": "https://api.stlouisfed.org/fred/series/observations?series_id=NYXRSA"
+        },
+        "refresh": "monthly",
+        "shared_config": {},
+        "series_id": "NYXRSA",
+        "data_dictionaries": [
+          {
+            "label": "NYXRSA Series Page",
+            "kind": "link",
+            "value": "https://fred.stlouisfed.org/series/NYXRSA"
+          }
+        ],
+        "raw_assets": [
+          {
+            "label": "Object store landing copy",
+            "kind": "object_storage",
+            "format": "csv",
+            "value": "s3://demo-raw/fred/nyxrsa/latest.csv",
+            "profile_ready": false
+          },
+          {
+            "label": "Local API landing extract",
+            "kind": "file",
+            "format": "csv",
+            "value": "data/demo/fred_home_price.csv",
+            "profile_ready": true
+          }
+        ]
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "source:fred.housing_group",
+      "kind": "source",
+      "extension_type": "group",
+      "label": "Housing Series Group",
+      "description": "Grouped FRED housing metrics with shared ingestion logic.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 36.0,
+        "y": 864.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "FRED",
+        "origin": {
+          "kind": "",
+          "value": ""
+        },
+        "refresh": "monthly",
+        "shared_config": {
+          "api_key_env": "FRED_API_KEY"
+        },
+        "series_id": "",
+        "data_dictionaries": [
+          {
+            "label": "Housing Series Notes",
+            "kind": "link",
+            "value": "https://fred.stlouisfed.org/tags/series?t=housing"
+          }
+        ],
+        "raw_assets": [
+          {
+            "label": "Housing parquet partition set",
+            "kind": "glob",
+            "format": "parquet_collection",
+            "value": "data/demo/fred_housing/*.parquet",
+            "profile_ready": false
+          }
+        ]
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "source:fred.rent_series",
+      "kind": "source",
+      "extension_type": "object",
+      "label": "CUUSA319SEHA",
+      "description": "NY rent index series.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "public",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 36.0,
+        "y": 1028.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "FRED",
+        "origin": {
+          "kind": "api_endpoint",
+          "value": "https://api.stlouisfed.org/fred/series/observations?series_id=CUUSA319SEHA"
+        },
+        "refresh": "monthly",
+        "shared_config": {},
+        "series_id": "CUUSA319SEHA",
+        "data_dictionaries": [
+          {
+            "label": "Rent Series Notes",
+            "kind": "link",
+            "value": "https://fred.stlouisfed.org/series/CUUSA319SEHA"
+          }
+        ],
+        "raw_assets": [
+          {
+            "label": "Object store landing copy",
+            "kind": "object_storage",
+            "format": "csv",
+            "value": "s3://demo-raw/fred/cuusa319seha/latest.csv",
+            "profile_ready": false
+          },
+          {
+            "label": "Local API landing extract",
+            "kind": "file",
+            "format": "csv",
+            "value": "data/demo/fred_rent_index.csv",
+            "profile_ready": true
+          }
+        ]
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    },
+    {
+      "id": "source:local.shadow_inventory_file",
+      "kind": "source",
+      "extension_type": "disk_path",
+      "label": "Shadow Inventory CSV",
+      "description": "Local landing file for inventory data.",
+      "tags": [],
+      "owner": "data-engineering",
+      "sensitivity": "internal",
+      "status": "active",
+      "work_status": "todo",
+      "profile_status": "schema_only",
+      "notes": "",
+      "position": {
+        "x": 36.0,
+        "y": 1192.0
+      },
+      "columns": [],
+      "source": {
+        "provider": "local",
+        "origin": {
+          "kind": "disk_path",
+          "value": "data/demo/shadow_inventory.csv"
+        },
+        "refresh": "weekly",
+        "shared_config": {},
+        "series_id": "",
+        "data_dictionaries": [
+          {
+            "label": "Shadow Inventory Dictionary",
+            "kind": "file",
+            "value": "docs/shadow_inventory_dictionary.md"
+          }
+        ],
+        "raw_assets": [
+          {
+            "label": "Local landing file",
+            "kind": "file",
+            "format": "csv",
+            "value": "data/demo/shadow_inventory.csv",
+            "profile_ready": true
+          }
+        ]
+      },
+      "data": {
+        "persistence": "",
+        "local_path": "",
+        "update_frequency": "",
+        "persisted": false,
+        "row_count": null,
+        "sampled": null,
+        "profile_target": ""
+      },
+      "compute": {
+        "runtime": "",
+        "inputs": [],
+        "outputs": [],
+        "notes": "",
+        "feature_selection": [],
+        "column_mappings": []
+      },
+      "contract": {
+        "route": "",
+        "component": "",
+        "ui_role": "",
+        "fields": []
+      },
+      "work_items": [],
+      "state": "confirmed",
+      "verification_state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "last_verified_by": "",
+      "last_verified_at": "",
+      "history": [],
+      "removed": false,
+      "removed_at": "",
+      "removed_by": ""
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:api_to_pricing_score_card",
+      "type": "binds",
+      "source": "contract:api.market_snapshot",
+      "target": "contract:ui.pricing_score_card",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "pricing_score",
+          "target_column": "pricingScoreCard",
+          "source_field_id": "field.api_market_snapshot.pricing_score",
+          "target_field_id": "field.ui_pricing_score_card.pricingscorecard"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:feature_builder_to_features",
+      "type": "produces",
+      "source": "compute:transform.feature_builder",
+      "target": "data:pricing_features",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "macro_momentum",
+          "target_column": "macro_momentum",
+          "source_field_id": "",
+          "target_field_id": "field.pricing_features.macro_momentum"
+        },
+        {
+          "source_column": "rent_pressure",
+          "target_column": "rent_pressure",
+          "source_field_id": "",
+          "target_field_id": "field.pricing_features.rent_pressure"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:feature_builder_uses_home_price",
+      "type": "depends_on",
+      "source": "data:fred_home_price_raw",
+      "target": "compute:transform.feature_builder",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "price_index",
+          "target_column": "macro_momentum",
+          "source_field_id": "field.fred_home_price_raw.price_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:feature_builder_uses_rent_index",
+      "type": "depends_on",
+      "source": "data:fred_rent_index_raw",
+      "target": "compute:transform.feature_builder",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "rent_index",
+          "target_column": "rent_pressure",
+          "source_field_id": "field.fred_rent_index_raw.rent_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:features_to_model",
+      "type": "depends_on",
+      "source": "data:pricing_features",
+      "target": "compute:model.pricing_v1",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "macro_momentum",
+          "target_column": "macro_momentum",
+          "source_field_id": "field.pricing_features.macro_momentum",
+          "target_field_id": ""
+        },
+        {
+          "source_column": "rent_pressure",
+          "target_column": "rent_pressure",
+          "source_field_id": "field.pricing_features.rent_pressure",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:fred_group_contains_home",
+      "type": "contains",
+      "source": "source:fred.housing_group",
+      "target": "source:fred.home_price_series",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:fred_group_contains_rent",
+      "type": "contains",
+      "source": "source:fred.housing_group",
+      "target": "source:fred.rent_series",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:fred_home_ingests_raw",
+      "type": "ingests",
+      "source": "source:fred.home_price_series",
+      "target": "data:fred_home_price_raw",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "value",
+          "target_column": "price_index",
+          "source_field_id": "",
+          "target_field_id": "field.fred_home_price_raw.price_index"
+        },
+        {
+          "source_column": "date",
+          "target_column": "date",
+          "source_field_id": "",
+          "target_field_id": "field.fred_home_price_raw.date"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:fred_provider_contains_group",
+      "type": "contains",
+      "source": "source:fred",
+      "target": "source:fred.housing_group",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:fred_rent_ingests_raw",
+      "type": "ingests",
+      "source": "source:fred.rent_series",
+      "target": "data:fred_rent_index_raw",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "value",
+          "target_column": "rent_index",
+          "source_field_id": "",
+          "target_field_id": "field.fred_rent_index_raw.rent_index"
+        },
+        {
+          "source_column": "date",
+          "target_column": "date",
+          "source_field_id": "",
+          "target_field_id": "field.fred_rent_index_raw.date"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:frontend_api_to_hero_median",
+      "type": "binds",
+      "source": "contract:api.frontend_market_signals",
+      "target": "contract:ui.hero_median_card",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "median_home_price",
+          "target_column": "heroMedianPrice",
+          "source_field_id": "field.api_frontend_market_signals.median_home_price",
+          "target_field_id": "field.ui_hero_median_card.heromedianprice"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:frontend_api_to_inventory_chip",
+      "type": "binds",
+      "source": "contract:api.frontend_market_signals",
+      "target": "contract:ui.inventory_chip",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "inventoryChip",
+          "source_field_id": "field.api_frontend_market_signals.shadow_inventory_index",
+          "target_field_id": "field.ui_inventory_chip.inventorychip"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:frontend_api_to_rent_chip",
+      "type": "binds",
+      "source": "contract:api.frontend_market_signals",
+      "target": "contract:ui.rent_trend_chip",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "rent_index",
+          "target_column": "rentTrendChip",
+          "source_field_id": "field.api_frontend_market_signals.rent_index",
+          "target_field_id": "field.ui_rent_trend_chip.renttrendchip"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:market_dashboard_contains_overview_strip",
+      "type": "contains",
+      "source": "contract:ui.market_dashboard",
+      "target": "contract:ui.market_overview_strip",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:market_signals_to_api",
+      "type": "serves",
+      "source": "data:market_signals",
+      "target": "contract:api.market_snapshot",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "median_home_price",
+          "target_column": "median_home_price",
+          "source_field_id": "field.market_signals.median_home_price",
+          "target_field_id": "field.api_market_snapshot.median_home_price"
+        },
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "shadow_inventory_index",
+          "source_field_id": "field.market_signals.shadow_inventory_index",
+          "target_field_id": "field.api_market_snapshot.shadow_inventory_index"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:market_signals_to_frontend_api",
+      "type": "serves",
+      "source": "data:market_signals",
+      "target": "contract:api.frontend_market_signals",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "median_home_price",
+          "target_column": "median_home_price",
+          "source_field_id": "field.market_signals.median_home_price",
+          "target_field_id": "field.api_frontend_market_signals.median_home_price"
+        },
+        {
+          "source_column": "rent_index",
+          "target_column": "rent_index",
+          "source_field_id": "field.market_signals.rent_index",
+          "target_field_id": "field.api_frontend_market_signals.rent_index"
+        },
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "shadow_inventory_index",
+          "source_field_id": "field.market_signals.shadow_inventory_index",
+          "target_field_id": "field.api_frontend_market_signals.shadow_inventory_index"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:model_depends_on_market_signals",
+      "type": "depends_on",
+      "source": "data:market_signals",
+      "target": "compute:model.pricing_v1",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "median_home_price",
+          "target_column": "median_home_price",
+          "source_field_id": "field.market_signals.median_home_price",
+          "target_field_id": ""
+        },
+        {
+          "source_column": "rent_index",
+          "target_column": "rent_index",
+          "source_field_id": "field.market_signals.rent_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:model_to_api",
+      "type": "serves",
+      "source": "compute:model.pricing_v1",
+      "target": "contract:api.market_snapshot",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "pricing_score",
+          "target_column": "pricing_score",
+          "source_field_id": "field.model_pricing_v1.pricing_score",
+          "target_field_id": "field.api_market_snapshot.pricing_score"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:overview_strip_contains_hero_median",
+      "type": "contains",
+      "source": "contract:ui.market_overview_strip",
+      "target": "contract:ui.hero_median_card",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:overview_strip_contains_inventory_chip",
+      "type": "contains",
+      "source": "contract:ui.market_overview_strip",
+      "target": "contract:ui.inventory_chip",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:overview_strip_contains_pricing_score",
+      "type": "contains",
+      "source": "contract:ui.market_overview_strip",
+      "target": "contract:ui.pricing_score_card",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:overview_strip_contains_rent_chip",
+      "type": "contains",
+      "source": "contract:ui.market_overview_strip",
+      "target": "contract:ui.rent_trend_chip",
+      "label": "",
+      "column_mappings": [],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:shadow_inventory_file_to_raw",
+      "type": "ingests",
+      "source": "source:local.shadow_inventory_file",
+      "target": "data:shadow_inventory_raw",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "shadow_inventory_index",
+          "source_field_id": "",
+          "target_field_id": "field.shadow_inventory_raw.shadow_inventory_index"
+        },
+        {
+          "source_column": "date",
+          "target_column": "date",
+          "source_field_id": "",
+          "target_field_id": "field.shadow_inventory_raw.date"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:transform_produces_market_signals",
+      "type": "produces",
+      "source": "compute:transform.market_inputs",
+      "target": "data:market_signals",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "median_home_price",
+          "target_column": "median_home_price",
+          "source_field_id": "",
+          "target_field_id": "field.market_signals.median_home_price"
+        },
+        {
+          "source_column": "rent_index",
+          "target_column": "rent_index",
+          "source_field_id": "",
+          "target_field_id": "field.market_signals.rent_index"
+        },
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "shadow_inventory_index",
+          "source_field_id": "",
+          "target_field_id": "field.market_signals.shadow_inventory_index"
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:transform_uses_home_price",
+      "type": "depends_on",
+      "source": "data:fred_home_price_raw",
+      "target": "compute:transform.market_inputs",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "price_index",
+          "target_column": "median_home_price",
+          "source_field_id": "field.fred_home_price_raw.price_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:transform_uses_rent_index",
+      "type": "depends_on",
+      "source": "data:fred_rent_index_raw",
+      "target": "compute:transform.market_inputs",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "rent_index",
+          "target_column": "rent_index",
+          "source_field_id": "field.fred_rent_index_raw.rent_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    },
+    {
+      "id": "edge:transform_uses_shadow_inventory",
+      "type": "depends_on",
+      "source": "data:shadow_inventory_raw",
+      "target": "compute:transform.market_inputs",
+      "label": "",
+      "column_mappings": [
+        {
+          "source_column": "shadow_inventory_index",
+          "target_column": "shadow_inventory_index",
+          "source_field_id": "field.shadow_inventory_raw.shadow_inventory_index",
+          "target_field_id": ""
+        }
+      ],
+      "notes": "",
+      "state": "confirmed",
+      "confidence": "high",
+      "evidence": [],
+      "removed": false,
+      "history": []
+    }
+  ]
+}

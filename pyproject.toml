@@ -1,0 +1,35 @@
+[project]
+name = "data-workbench"
+version = "0.1.0"
+description = "Spec-first data workbench with graph views, profiling, and save-to-plan diffs."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "OpenAI Codex" }]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pydantic>=2.8,<3",
+  "polars>=1.30,<2",
+  "pyyaml>=6.0,<7",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+e2e = [
+  "playwright>=1.58,<2",
+]
+
+[project.scripts]
+data-workbench = "workbench.app:main"
+data-workbench-worker = "workbench.worker:main"
+data-workbench-structure = "workbench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
