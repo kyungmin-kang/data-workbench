@@ -106,6 +106,9 @@ class StorePersistenceTests(unittest.TestCase):
         self.assertTrue((self.root / artifacts["latest_markdown"]).exists())
         self.assertIn(store.storage_key(store.LATEST_PLAN_JSON_KEY), fake_store.documents)
         self.assertIn(store.storage_key(store.LATEST_PLAN_JSON_KEY), fake_object_store.documents)
+        self.assertEqual(store.load_latest_plan_artifacts(), artifacts)
+        self.assertEqual(json.loads(fake_store.documents[store.storage_key(store.LATEST_PLAN_ARTIFACTS_KEY)]), artifacts)
+        self.assertEqual(json.loads(fake_object_store.documents[store.storage_key(store.LATEST_PLAN_ARTIFACTS_KEY)]), artifacts)
         self.assertEqual(artifacts["remote_latest_json"], "minio://workbench-artifacts/plans/latest.plan.json")
         self.assertEqual(loaded_plan["markdown"], "# Demo Plan\n")
 

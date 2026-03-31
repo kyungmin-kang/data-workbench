@@ -12,7 +12,7 @@ import yaml
 
 from .diagnostics import build_graph_diagnostics, describe_downstream_component_impacts, infer_ui_roles
 from .openapi_importer import HTTP_METHODS, extract_response_fields
-from .project_profiler import profile_project
+from .project_profiler import resolve_project_profile
 from .store import list_bundles, load_bundle, load_graph, save_bundle, save_graph, utc_timestamp
 from .types import (
     OBSERVED_PRECEDENCE,
@@ -171,11 +171,19 @@ def scan_structure(
     scope: str = "full",
     include_tests: bool = False,
     include_internal: bool = True,
+    profile_token: str | None = None,
+    force_refresh: bool = False,
     doc_paths: list[str] | None = None,
     selected_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     canonical_graph = load_graph()
-    profile = profile_project(root_dir, include_tests=include_tests, include_internal=include_internal)
+    profile = resolve_project_profile(
+        root_dir,
+        include_tests=include_tests,
+        include_internal=include_internal,
+        profile_token=profile_token,
+        force_refresh=force_refresh,
+    )
     doc_candidates = collect_document_candidates(root_dir, doc_paths or [])
     fingerprint = build_scan_fingerprint(
         canonical_graph,

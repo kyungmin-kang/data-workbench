@@ -19,7 +19,18 @@ from .openapi_importer import OpenAPIImportSpec, import_openapi_into_graph
 from .project_bootstrap import bootstrap_project_into_graph
 from .profile import profile_graph
 from .project_profiler import is_ignored_project_dir_name, resolve_project_profile
-from .store import ROOT_DIR, export_canonical_yaml_text, get_root_dir, list_bundles, load_bundle, load_graph, load_latest_plan, save_graph, write_plan_artifacts
+from .store import (
+    ROOT_DIR,
+    export_canonical_yaml_text,
+    get_root_dir,
+    list_bundles,
+    load_bundle,
+    load_graph,
+    load_latest_plan,
+    load_latest_plan_artifacts,
+    save_graph,
+    write_plan_artifacts,
+)
 from .structure_memory import (
     build_structure_summary,
     import_yaml_spec,
@@ -47,6 +58,7 @@ def graph_payload(graph: dict) -> dict:
         "diagnostics": diagnostics,
         "validation": validation,
         "latest_plan": load_latest_plan(),
+        "latest_artifacts": load_latest_plan_artifacts(),
         "structure": build_structure_summary(graph, diagnostics=diagnostics, validation_report=validation),
     }
 
@@ -123,6 +135,8 @@ class StructureScanRequest(BaseModel):
     scope: str = "full"
     include_tests: bool = False
     include_internal: bool = True
+    profile_token: str | None = None
+    force_refresh: bool = False
     root_path: str | None = None
     doc_paths: list[str] = []
     selected_paths: list[str] = []
@@ -228,6 +242,8 @@ def structure_scan_endpoint(payload: StructureScanRequest) -> dict[str, Any]:
             scope=payload.scope,
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
+            profile_token=payload.profile_token,
+            force_refresh=payload.force_refresh,
             doc_paths=payload.doc_paths,
             selected_paths=payload.selected_paths,
         )
@@ -325,7 +341,10 @@ def rebase_structure_bundle_endpoint(bundle_id: str, payload: StructureBundleReb
 
 @app.get("/api/plans/latest")
 def get_latest_plan() -> dict[str, Any]:
-    return {"plan": load_latest_plan()}
+    return {
+        "plan": load_latest_plan(),
+        "artifacts": load_latest_plan_artifacts(),
+    }
 
 
 def resolve_profile_root(root_path: str | None) -> Path:

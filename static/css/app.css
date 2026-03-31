@@ -2171,6 +2171,30 @@ textarea {
   background: rgba(30, 95, 116, 0.08);
 }
 
+.artifact-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.artifact-item {
+  display: grid;
+  gap: 4px;
+}
+
+.artifact-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.artifact-item code {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .edge-line {
   stroke: rgba(31, 26, 23, 0.25);
   stroke-width: 2;

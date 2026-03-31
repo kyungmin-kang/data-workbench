@@ -1016,6 +1016,17 @@ def pricing_snapshot(session):
         self.assertEqual(sorted(payload["plan"]["tiers"].keys()), ["tier_1", "tier_2", "tier_3"])
         self.assertTrue((self.root / payload["artifacts"]["latest_markdown"]).exists())
 
+    def test_graph_payload_includes_latest_plan_artifacts_after_save(self) -> None:
+        graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
+        save_response = self.client.post("/api/graph/save", json={"graph": graph})
+        self.assertEqual(save_response.status_code, 200)
+
+        graph_response = self.client.get("/api/graph")
+        self.assertEqual(graph_response.status_code, 200)
+        payload = graph_response.json()
+        self.assertEqual(payload["latest_artifacts"]["latest_json"], "runtime/plans/latest.plan.json")
+        self.assertEqual(payload["latest_artifacts"]["latest_markdown"], "runtime/plans/latest.plan.md")
+
     def test_validate_endpoint_returns_blocking_issues_for_invalid_graph(self) -> None:
         graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
         api_node = next(node for node in graph["nodes"] if node["id"] == "contract:api.market_snapshot")
@@ -1537,6 +1548,77 @@ def token_bootstrap():
                 for node in imported_graph["nodes"]
             )
         )
+
+    def test_structure_scan_can_use_cached_profile_token_and_force_refresh(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        route_path = backend_dir / "token_scan.py"
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/token-scan-one")
+def token_scan_one():
+    return {"scan_one": 1}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        profile_response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(profile_response.status_code, 200)
+        token = profile_response.json()["project_profile"]["cache"]["token"]
+
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/token-scan-one")
+def token_scan_one():
+    return {"scan_one": 1}
+
+@router.get("/api/token-scan-two")
+def token_scan_two():
+    return {"scan_two": 2}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        cached_scan = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "profile_token": token,
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(cached_scan.status_code, 200)
+        cached_profile = cached_scan.json()["project_profile"]
+        self.assertTrue(cached_profile["cache"]["cached"])
+        cached_routes = {hint["route"] for hint in cached_profile["api_contract_hints"]}
+        self.assertNotIn("GET /api/token-scan-two", cached_routes)
+
+        refreshed_scan = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "profile_token": token,
+                "force_refresh": True,
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(refreshed_scan.status_code, 200)
+        refreshed_profile = refreshed_scan.json()["project_profile"]
+        self.assertFalse(refreshed_profile["cache"]["cached"])
+        refreshed_routes = {hint["route"] for hint in refreshed_profile["api_contract_hints"]}
+        self.assertIn("GET /api/token-scan-two", refreshed_routes)
 
     def test_project_directories_endpoint_returns_matching_directories(self) -> None:
         nested_root = self.root / "examples" / "client_app"

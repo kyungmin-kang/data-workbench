@@ -417,7 +417,7 @@ async function loadGraph() {
   state.validationReport = payload.validation || null;
   state.latestPlan = payload.latest_plan || null;
   state.structure = payload.structure || null;
-  state.lastArtifacts = null;
+  state.lastArtifacts = payload.latest_artifacts || null;
   state.bindingSuggestions = {};
   state.selectedNodeId = null;
   state.selectedEdgeId = null;
@@ -640,7 +640,7 @@ function bindEvents() {
     state.validationReport = payload.validation || null;
     state.structure = payload.structure || state.structure;
     state.latestPlan = payload.latest_plan || state.latestPlan;
-    state.lastArtifacts = null;
+    state.lastArtifacts = payload.latest_artifacts || state.lastArtifacts;
     state.dirty = false;
     render();
     setStatus("Profiles refreshed", "Quick stats updated where data was accessible.");
@@ -1938,6 +1938,43 @@ function renderMappingSection(title, edges) {
   `;
 }
 
+function getPlanArtifactRows(artifacts) {
+  if (!artifacts || typeof artifacts !== "object") {
+    return [];
+  }
+  const rows = [
+    ["Latest JSON", artifacts.latest_json],
+    ["Latest Markdown", artifacts.latest_markdown],
+    ["Timestamped JSON", artifacts.timestamped_json],
+    ["Timestamped Markdown", artifacts.timestamped_markdown],
+    ["Remote latest JSON", artifacts.remote_latest_json],
+    ["Remote latest Markdown", artifacts.remote_latest_markdown],
+    ["Remote timestamped JSON", artifacts.remote_timestamped_json],
+    ["Remote timestamped Markdown", artifacts.remote_timestamped_markdown],
+  ];
+  return rows.filter(([, value]) => Boolean(value));
+}
+
+function renderPlanArtifacts(artifacts) {
+  const rows = getPlanArtifactRows(artifacts);
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="artifacts">
+      <strong>Artifacts</strong>
+      <div class="artifact-list">
+        ${rows.map(([label, value]) => `
+          <div class="artifact-item">
+            <span class="artifact-label">${escapeHtml(label)}</span>
+            <code>${escapeHtml(value)}</code>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderPlan() {
   if (!state.latestPlan) {
     planSummary.innerHTML = '<div class="success-chip">✓ No issues</div><p class="hint">Save the graph to compute a deterministic diff.</p>';
@@ -1961,13 +1998,7 @@ function renderPlan() {
   ];
   planSummary.innerHTML = `
     <div class="severity-grid">${tiles.map(renderSeverityTile).join("")}</div>
-    ${state.lastArtifacts ? `
-      <div class="artifacts">
-        <strong>Artifacts</strong>
-        <div>${escapeHtml(state.lastArtifacts.latest_json)}</div>
-        <div>${escapeHtml(state.lastArtifacts.latest_markdown)}</div>
-      </div>
-    ` : ""}
+    ${renderPlanArtifacts(state.lastArtifacts)}
     <div class="plan-tier compact-tier">
       <h3>Metadata tracked</h3>
       ${renderCompactPlanList("Feature-selection updates", state.latestPlan.diff?.changed_feature_selection || [])}
@@ -9931,7 +9962,13 @@ async function loadStructureBundle(bundleId, options = {}) {
 }
 
 async function runStructureScan() {
-  setStatus("Scanning structure...", `Running a ${state.structureDraft.role} pass across the current root, docs, and selected paths.`);
+  const profileToken = state.projectProfile?.cache?.token || null;
+  setStatus(
+    "Scanning structure...",
+    profileToken
+      ? `Running a ${state.structureDraft.role} pass across the current root, docs, and selected paths using the current discovery snapshot.`
+      : `Running a ${state.structureDraft.role} pass across the current root, docs, and selected paths.`
+  );
   const response = await fetch("/api/structure/scan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -9940,6 +9977,7 @@ async function runStructureScan() {
       scope: state.structureDraft.scope || "changed",
       include_tests: state.projectProfileOptions.includeTests,
       include_internal: state.projectProfileOptions.includeInternal,
+      profile_token: profileToken,
       root_path: state.projectProfileOptions.rootPath || "",
       doc_paths: parseMultilineList(state.structureDraft.docPathsText),
       selected_paths: parseMultilineList(state.structureDraft.selectedPathsText),

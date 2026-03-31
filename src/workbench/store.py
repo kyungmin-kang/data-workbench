@@ -19,6 +19,7 @@ GRAPH_JSON_KEY = "graphs/current.json"
 GRAPH_YAML_KEY = "graphs/current.yaml"
 LATEST_PLAN_JSON_KEY = "plans/latest.plan.json"
 LATEST_PLAN_MARKDOWN_KEY = "plans/latest.plan.md"
+LATEST_PLAN_ARTIFACTS_KEY = "plans/latest.artifacts.json"
 ONBOARDING_PRESETS_KEY = "presets/onboarding.json"
 BUNDLE_PREFIX = "bundles/"
 
@@ -388,14 +389,17 @@ def canonical_yaml_payload(graph: dict[str, Any]) -> dict[str, Any]:
 
 def write_plan_artifacts(plan: dict[str, Any]) -> dict[str, str]:
     timestamp = utc_timestamp().replace(":", "-")
-    artifacts = _plan_artifact_paths(timestamp)
+    artifacts: dict[str, str] = {}
     if local_persistence_enabled():
-        _write_plan_artifacts_local(plan, artifacts)
+        local_artifacts = _plan_artifact_paths(timestamp)
+        _write_plan_artifacts_local(plan, local_artifacts)
+        artifacts.update(local_artifacts)
     if postgres_persistence_enabled():
         _write_plan_artifacts_postgres(plan, timestamp)
     if object_store_enabled():
         _write_plan_artifacts_object_store(plan, timestamp)
         artifacts.update(_plan_artifact_object_paths(timestamp))
+    _write_latest_plan_artifact_metadata(artifacts)
     return artifacts
 
 
@@ -454,6 +458,78 @@ def _plan_artifact_object_paths(timestamp: str) -> dict[str, str]:
         "remote_timestamped_json": object_store_uri(f"plans/{timestamp}.plan.json"),
         "remote_timestamped_markdown": object_store_uri(f"plans/{timestamp}.plan.md"),
     }
+
+
+def _write_latest_plan_artifact_metadata(artifacts: dict[str, str]) -> None:
+    metadata_text = json.dumps(artifacts, indent=2, ensure_ascii=True) + "\n"
+    if local_persistence_enabled():
+        path = get_plans_dir() / "latest.artifacts.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            file.write(metadata_text)
+    if postgres_persistence_enabled():
+        _get_postgres_document_store().write_text(
+            storage_key(LATEST_PLAN_ARTIFACTS_KEY),
+            metadata_text,
+            content_type="application/json",
+        )
+    if object_store_enabled():
+        _get_object_store().write_text(
+            storage_key(LATEST_PLAN_ARTIFACTS_KEY),
+            metadata_text,
+            content_type="application/json",
+        )
+
+
+def load_latest_plan_artifacts() -> dict[str, str] | None:
+    if postgres_persistence_enabled():
+        store = _get_postgres_document_store()
+        metadata_text = store.read_text(storage_key(LATEST_PLAN_ARTIFACTS_KEY))
+        metadata = _parse_latest_plan_artifacts(metadata_text)
+        if metadata is not None:
+            return metadata
+    if object_store_enabled():
+        metadata_text = _get_object_store().read_text(storage_key(LATEST_PLAN_ARTIFACTS_KEY))
+        metadata = _parse_latest_plan_artifacts(metadata_text)
+        if metadata is not None:
+            return metadata
+    return _load_latest_plan_artifacts_local()
+
+
+def _load_latest_plan_artifacts_local() -> dict[str, str] | None:
+    path = get_plans_dir() / "latest.artifacts.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    artifacts = {
+        str(key): str(value)
+        for key, value in payload.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+    return artifacts or None
+
+
+def _parse_latest_plan_artifacts(payload_text: str | None) -> dict[str, str] | None:
+    if not payload_text:
+        return None
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    artifacts = {
+        str(key): str(value)
+        for key, value in payload.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+    return artifacts or None
 
 
 def load_latest_plan() -> dict[str, Any] | None:

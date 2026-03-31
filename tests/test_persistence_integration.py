@@ -112,6 +112,7 @@ class PersistenceIntegrationTests(unittest.TestCase):
 
         self.assertIn(store.storage_key(store.GRAPH_JSON_KEY), postgres_keys)
         self.assertIn(store.storage_key(store.LATEST_PLAN_JSON_KEY), postgres_keys)
+        self.assertIn(store.storage_key(store.LATEST_PLAN_ARTIFACTS_KEY), postgres_keys)
         self.assertIn(store.storage_key("bundles/integration-bundle.yaml"), postgres_keys)
         self.assertIn(store.storage_key(store.ONBOARDING_PRESETS_KEY), postgres_keys)
 
@@ -132,6 +133,7 @@ class PersistenceIntegrationTests(unittest.TestCase):
 
         self.assertIn(store.storage_key(store.GRAPH_JSON_KEY), object_names)
         self.assertIn(store.storage_key(store.LATEST_PLAN_JSON_KEY), object_names)
+        self.assertIn(store.storage_key(store.LATEST_PLAN_ARTIFACTS_KEY), object_names)
         self.assertIn(store.storage_key("bundles/integration-bundle.yaml"), object_names)
         self.assertIn(store.storage_key(store.ONBOARDING_PRESETS_KEY), object_names)
 
