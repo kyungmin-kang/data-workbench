@@ -10570,6 +10570,7 @@ async function runImportAsset(importSpec, options = {}) {
     body: JSON.stringify({
       graph: state.graph,
       import_spec: importSpec,
+      root_path: state.projectProfileOptions.rootPath || "",
     }),
   });
   const payload = await response.json();
@@ -10622,6 +10623,7 @@ async function importSelectedProjectSuggestions() {
     body: JSON.stringify({
       graph: state.graph,
       import_specs: importSpecs,
+      root_path: state.projectProfileOptions.rootPath || "",
     }),
   });
   const payload = await response.json();
@@ -10682,6 +10684,7 @@ async function importProjectBootstrap() {
       graph: state.graph,
       include_tests: state.projectProfileOptions.includeTests,
       include_internal: state.projectProfileOptions.includeInternal,
+      root_path: state.projectProfileOptions.rootPath || "",
       asset_paths: selectedPaths,
       api_hint_ids: apiHintIds,
       ui_hint_ids: uiHintIds,
@@ -10839,6 +10842,9 @@ async function importProjectHint(hintKind, hintId) {
       graph: state.graph,
       hint_kind: hintKind,
       hint_id: hintId,
+      root_path: state.projectProfileOptions.rootPath || "",
+      include_tests: state.projectProfileOptions.includeTests,
+      include_internal: state.projectProfileOptions.includeInternal,
     }),
   });
   const payload = await response.json();
@@ -10953,6 +10959,7 @@ async function runOpenAPIImport(importSpec, options = {}) {
     body: JSON.stringify({
       graph: state.graph,
       import_spec: importSpec,
+      root_path: state.projectProfileOptions.rootPath || "",
     }),
   });
   const payload = await response.json();

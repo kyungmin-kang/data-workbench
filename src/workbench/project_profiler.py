@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from copy import deepcopy
+import os
 from pathlib import Path
 import re
 
@@ -12,7 +13,22 @@ from .profile import build_asset_descriptor, profile_asset
 from .sql_scanner import scan_sql_structure_hints
 
 
-IGNORED_PARTS = {".git", ".venv", "__pycache__", "runtime", ".pytest_cache"}
+IGNORED_PARTS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "runtime",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".next",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+}
 DATA_SUFFIXES = {".csv", ".gz", ".parquet", ".zip"}
 CODE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".sql"}
 DOC_SUFFIXES = {".md", ".pdf"}
@@ -99,29 +115,37 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
         "manifests": manifests,
         "code_files_sample": code_files[:12],
         "docs_sample": docs[:12],
-        "data_assets": data_assets[:12],
-        "api_contract_hints": code_hints["api_contract_hints"][:20],
-        "ui_contract_hints": code_hints["ui_contract_hints"][:20],
-        "sql_structure_hints": code_hints["sql_structure_hints"][:20],
-        "orm_structure_hints": code_hints["orm_structure_hints"][:20],
-        "planning_api_hints": planning_hints["planning_api_hints"][:20],
-        "planning_data_hints": planning_hints["planning_data_hints"][:20],
-        "planning_compute_hints": planning_hints["planning_compute_hints"][:20],
+        "data_assets": data_assets,
+        "api_contract_hints": code_hints["api_contract_hints"],
+        "ui_contract_hints": code_hints["ui_contract_hints"],
+        "sql_structure_hints": code_hints["sql_structure_hints"],
+        "orm_structure_hints": code_hints["orm_structure_hints"],
+        "planning_api_hints": planning_hints["planning_api_hints"],
+        "planning_data_hints": planning_hints["planning_data_hints"],
+        "planning_compute_hints": planning_hints["planning_compute_hints"],
     }
 
 
+def is_ignored_project_dir_name(name: str) -> bool:
+    return name in IGNORED_PARTS or name.endswith(".egg-info")
+
+
 def iter_project_files(root_dir: Path, *, include_tests: bool, include_internal: bool):
-    for path in root_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in IGNORED_PARTS for part in path.parts):
-            continue
-        relative = path.relative_to(root_dir).as_posix()
-        if not include_tests and is_test_path(relative):
-            continue
-        if not include_internal and is_internal_workbench_path(relative):
-            continue
-        yield path
+    for current_root, dirnames, filenames in os.walk(root_dir):
+        dirnames[:] = sorted(
+            dirname
+            for dirname in dirnames
+            if not is_ignored_project_dir_name(dirname)
+        )
+        current_root_path = Path(current_root)
+        for filename in sorted(filenames):
+            path = current_root_path / filename
+            relative = path.relative_to(root_dir).as_posix()
+            if not include_tests and is_test_path(relative):
+                continue
+            if not include_internal and is_internal_workbench_path(relative):
+                continue
+            yield path
 
 
 def summarize_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:

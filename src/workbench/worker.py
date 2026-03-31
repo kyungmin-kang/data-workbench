@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 
 from .profile import profile_graph
-from .store import get_cache_dir, get_root_dir, load_graph, save_graph
+from .store import canonical_yaml_payload, get_cache_dir, get_root_dir, load_graph, save_graph
 from .types import validate_graph
 
 
@@ -18,6 +18,28 @@ def write_heartbeat(payload: dict) -> None:
         file.write("\n")
 
 
+def run_cycle(auto_profile: bool) -> dict:
+    heartbeat = {
+        "status": "ok",
+        "auto_profile": auto_profile,
+        "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+    if not auto_profile:
+        return heartbeat
+    try:
+        graph = load_graph()
+        refreshed = validate_graph(profile_graph(graph, get_root_dir()))
+        changed = canonical_yaml_payload(graph) != canonical_yaml_payload(refreshed)
+        if changed:
+            save_graph(refreshed)
+        heartbeat["profiled"] = True
+        heartbeat["changed"] = changed
+    except Exception as error:  # pragma: no cover - loop resilience
+        heartbeat["status"] = "error"
+        heartbeat["error"] = str(error)
+    return heartbeat
+
+
 def main() -> None:
     import os
 
@@ -25,16 +47,7 @@ def main() -> None:
     auto_profile = os.environ.get("WORKBENCH_AUTO_PROFILE", "0") == "1"
 
     while True:
-        heartbeat = {
-            "status": "ok",
-            "auto_profile": auto_profile,
-            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        }
-        if auto_profile:
-            graph = load_graph()
-            refreshed = validate_graph(profile_graph(graph, get_root_dir()))
-            save_graph(refreshed)
-            heartbeat["profiled"] = True
+        heartbeat = run_cycle(auto_profile)
         write_heartbeat(heartbeat)
         time.sleep(interval_seconds)
 

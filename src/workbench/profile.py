@@ -35,6 +35,8 @@ def profile_graph(graph: dict, root_dir: Path) -> dict:
                 node["data"]["profile_target"] = profile["profile_target"]
                 continue
         node["profile_status"] = "schema_only"
+        node["columns"] = clear_profile_metrics(node.get("columns", []))
+        node["data"]["row_count"] = None
         node["data"]["sampled"] = False
     return updated
 
@@ -218,6 +220,16 @@ def merge_profile_into_columns(existing_columns: list[dict], profiled_columns: l
         column["stats"] = profiled_column["stats"]
         merged.append(column)
     return merged
+
+
+def clear_profile_metrics(columns: list[dict]) -> list[dict]:
+    cleared: list[dict] = []
+    for existing_column in columns:
+        column = deepcopy(existing_column)
+        column["null_pct"] = None
+        column["stats"] = {}
+        cleared.append(column)
+    return cleared
 
 
 def _profile_series(series: pl.Series, sample_row_count: int) -> dict:

@@ -232,11 +232,31 @@ def _validate_ref(reference: str, index: dict[str, Any]) -> str | None:
 def _node_has_binding_name(node: dict[str, Any], binding_name: str) -> bool:
     if node["kind"] == "contract":
         return any(field["name"] == binding_name for field in node.get("contract", {}).get("fields", []))
+    if node["kind"] == "compute":
+        return binding_name in _compute_binding_names(node)
     return find_column(node, binding_name) is not None
 
 
 def _node_requires_declared_bindings(node: dict[str, Any]) -> bool:
-    return node["kind"] in {"data", "contract"}
+    return node["kind"] in {"data", "contract", "compute"}
+
+
+def _compute_binding_names(node: dict[str, Any]) -> set[str]:
+    names = {
+        column["name"]
+        for column in node.get("columns", [])
+        if column.get("name")
+    }
+    for mapping in node.get("compute", {}).get("column_mappings", []):
+        for key in ("source", "target"):
+            reference = mapping.get(key, "")
+            if "." in reference:
+                names.add(reference.rsplit(".", 1)[-1])
+    for feature in node.get("compute", {}).get("feature_selection", []):
+        reference = feature.get("column_ref", "")
+        if "." in reference:
+            names.add(reference.rsplit(".", 1)[-1])
+    return names
 
 
 def _issue(

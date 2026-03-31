@@ -18,7 +18,7 @@ from .onboarding_presets import OnboardingPreset, delete_onboarding_preset, load
 from .openapi_importer import OpenAPIImportSpec, import_openapi_into_graph
 from .project_bootstrap import bootstrap_project_into_graph
 from .profile import profile_graph
-from .project_profiler import profile_project
+from .project_profiler import is_ignored_project_dir_name, profile_project
 from .store import ROOT_DIR, export_canonical_yaml_text, get_root_dir, list_bundles, load_bundle, load_graph, load_latest_plan, save_graph, write_plan_artifacts
 from .structure_memory import (
     build_structure_summary,
@@ -58,16 +58,19 @@ class GraphSaveRequest(BaseModel):
 class AssetImportRequest(BaseModel):
     graph: dict[str, Any]
     import_spec: AssetImportSpec
+    root_path: str | None = None
 
 
 class OpenAPIImportRequest(BaseModel):
     graph: dict[str, Any]
     import_spec: OpenAPIImportSpec
+    root_path: str | None = None
 
 
 class BulkAssetImportRequest(BaseModel):
     graph: dict[str, Any]
     import_specs: list[AssetImportSpec]
+    root_path: str | None = None
 
 
 class GraphValidateRequest(BaseModel):
@@ -85,12 +88,16 @@ class ProjectHintImportRequest(BaseModel):
     graph: dict[str, Any]
     hint_kind: str
     hint_id: str
+    root_path: str | None = None
+    include_tests: bool = False
+    include_internal: bool = True
 
 
 class ProjectBootstrapRequest(BaseModel):
     graph: dict[str, Any]
     include_tests: bool = False
     include_internal: bool = True
+    root_path: str | None = None
     asset_paths: list[str] = []
     api_hint_ids: list[str] = []
     ui_hint_ids: list[str] = []
@@ -346,21 +353,32 @@ def search_project_directories(base_path: str | None, query: str, *, limit: int 
     maybe_add(root_dir)
     if not normalized_query:
         for child in sorted(root_dir.iterdir()):
-            if child.is_dir():
+            if child.is_dir() and not is_ignored_project_dir_name(child.name):
                 maybe_add(child)
                 if len(matches) >= limit:
                     break
         return matches[:limit]
 
-    for path in root_dir.rglob("*"):
-        if not path.is_dir():
+    stack = [root_dir]
+    while stack and len(matches) < limit:
+        current = stack.pop()
+        try:
+            child_dirs = sorted(
+                child
+                for child in current.iterdir()
+                if child.is_dir() and not is_ignored_project_dir_name(child.name)
+            )
+        except OSError:
             continue
-        relative = str(path.relative_to(root_dir)).lower()
-        if normalized_query not in path.name.lower() and normalized_query not in relative and normalized_query not in str(path).lower():
-            continue
-        maybe_add(path)
-        if len(matches) >= limit:
-            break
+        for child in reversed(child_dirs):
+            stack.append(child)
+        for path in child_dirs:
+            relative = str(path.relative_to(root_dir)).lower()
+            if normalized_query not in path.name.lower() and normalized_query not in relative and normalized_query not in str(path).lower():
+                continue
+            maybe_add(path)
+            if len(matches) >= limit:
+                break
     return matches[:limit]
 
 
@@ -420,7 +438,8 @@ def delete_onboarding_preset_endpoint(preset_id: str) -> dict[str, Any]:
 def import_asset_endpoint(payload: AssetImportRequest) -> dict[str, Any]:
     try:
         graph = validate_graph(payload.graph)
-        imported = import_asset_into_graph(graph, payload.import_spec, get_root_dir())
+        root_dir = resolve_profile_root(payload.root_path)
+        imported = import_asset_into_graph(graph, payload.import_spec, root_dir)
         updated_graph = imported["graph"]
         validation = build_validation_report(updated_graph)
         return {
@@ -438,7 +457,8 @@ def import_asset_endpoint(payload: AssetImportRequest) -> dict[str, Any]:
 def import_assets_bulk_endpoint(payload: BulkAssetImportRequest) -> dict[str, Any]:
     try:
         graph = validate_graph(payload.graph)
-        imported = import_assets_into_graph(graph, payload.import_specs, get_root_dir())
+        root_dir = resolve_profile_root(payload.root_path)
+        imported = import_assets_into_graph(graph, payload.import_specs, root_dir)
         updated_graph = imported["graph"]
         validation = build_validation_report(updated_graph)
         return {
@@ -457,7 +477,8 @@ def import_assets_bulk_endpoint(payload: BulkAssetImportRequest) -> dict[str, An
 def import_openapi_endpoint(payload: OpenAPIImportRequest) -> dict[str, Any]:
     try:
         graph = validate_graph(payload.graph)
-        imported = import_openapi_into_graph(graph, payload.import_spec, get_root_dir())
+        root_dir = resolve_profile_root(payload.root_path)
+        imported = import_openapi_into_graph(graph, payload.import_spec, root_dir)
         updated_graph = imported["graph"]
         validation = build_validation_report(updated_graph)
         return {
@@ -504,7 +525,12 @@ def contract_binding_suggestions_endpoint(payload: ContractBindingSuggestionRequ
 def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str, Any]:
     try:
         graph = validate_graph(payload.graph)
-        project_profile = profile_project(get_root_dir(), include_tests=True, include_internal=True)
+        root_dir = resolve_profile_root(payload.root_path)
+        project_profile = profile_project(
+            root_dir,
+            include_tests=payload.include_tests,
+            include_internal=payload.include_internal,
+        )
         if payload.hint_kind == "api":
             hint = next(
                 (item for item in project_profile.get("api_contract_hints", []) if item["id"] == payload.hint_id),
@@ -546,9 +572,10 @@ def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str,
 def import_project_bootstrap_endpoint(payload: ProjectBootstrapRequest) -> dict[str, Any]:
     try:
         graph = validate_graph(payload.graph)
+        root_dir = resolve_profile_root(payload.root_path)
         imported = bootstrap_project_into_graph(
             graph,
-            get_root_dir(),
+            root_dir,
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
             asset_paths=payload.asset_paths,
