@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .store import get_onboarding_presets_path, utc_timestamp
+from .store import load_onboarding_presets_payload, save_onboarding_presets_payload, utc_timestamp
 from .types import slugify
 
 
@@ -31,11 +30,7 @@ class OnboardingPreset(BaseModel):
 
 
 def load_onboarding_presets() -> list[dict[str, Any]]:
-    path = get_onboarding_presets_path()
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8") as file:
-        data = json.load(file)
+    data = load_onboarding_presets_payload()
     if not isinstance(data, list):
         return []
     presets = [OnboardingPreset.model_validate(item).model_dump(mode="json") for item in data]
@@ -71,15 +66,11 @@ def delete_onboarding_preset(preset_id: str) -> bool:
 
 
 def write_onboarding_presets(presets: list[dict[str, Any]]) -> None:
-    path = get_onboarding_presets_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     ordered = sorted(
         [OnboardingPreset.model_validate(item).model_dump(mode="json") for item in presets],
         key=lambda item: item["name"].lower(),
     )
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(ordered, file, indent=2, ensure_ascii=True)
-        file.write("\n")
+    save_onboarding_presets_payload(ordered)
 
 
 def build_unique_preset_id(existing: list[dict[str, Any]], name: str) -> str:

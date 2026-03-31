@@ -4,7 +4,6 @@ from typing import Any
 
 from .hint_importer import import_api_hint_into_graph, import_ui_hint_into_graph
 from .importer import import_assets_into_graph
-from .project_profiler import profile_project
 from .types import validate_graph
 
 
@@ -12,6 +11,7 @@ def bootstrap_project_into_graph(
     graph: dict[str, Any],
     root_dir,
     *,
+    project_profile: dict[str, Any] | None = None,
     include_tests: bool = False,
     include_internal: bool = True,
     asset_paths: list[str] | None = None,
@@ -21,11 +21,14 @@ def bootstrap_project_into_graph(
     import_api_hints: bool = True,
     import_ui_hints: bool = True,
 ) -> dict[str, Any]:
-    project_profile = profile_project(
-        root_dir,
-        include_tests=include_tests,
-        include_internal=include_internal,
-    )
+    if project_profile is None:
+        from .project_profiler import resolve_project_profile
+
+        project_profile = resolve_project_profile(
+            root_dir,
+            include_tests=include_tests,
+            include_internal=include_internal,
+        )
     updated = validate_graph(graph)
 
     summary: dict[str, Any] = {

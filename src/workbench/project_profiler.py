@@ -3,14 +3,18 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from copy import deepcopy
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+from typing import Any
 
 from .orm_scanner import collect_relationship_targets as collect_orm_relationship_targets
 from .orm_scanner import collect_sqlalchemy_table_relations, merge_relationship_targets, scan_orm_structure_hints
 from .profile import build_asset_descriptor, profile_asset
 from .sql_scanner import scan_sql_structure_hints
+from .store import get_cache_dir, utc_timestamp
 
 
 IGNORED_PARTS = {
@@ -70,6 +74,7 @@ DESTRUCTURE_ASSIGN_RE = re.compile(
     r"(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\b",
 )
 GENERIC_UI_FIELDS = {"data", "json", "status", "length", "value", "items", "results", "meta"}
+PROJECT_PROFILE_CACHE_VERSION = "2"
 
 
 def profile_project(root_dir: Path, *, include_tests: bool = False, include_internal: bool = True) -> dict:
@@ -124,6 +129,129 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
         "planning_data_hints": planning_hints["planning_data_hints"],
         "planning_compute_hints": planning_hints["planning_compute_hints"],
     }
+
+
+def resolve_project_profile(
+    root_dir: Path,
+    *,
+    include_tests: bool = False,
+    include_internal: bool = True,
+    profile_token: str | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    expected_token = build_project_profile_cache_token(
+        root_dir,
+        include_tests=include_tests,
+        include_internal=include_internal,
+    )
+    candidate_tokens = [token for token in (profile_token, expected_token) if token]
+    if not force_refresh:
+        for token in candidate_tokens:
+            cached = load_cached_project_profile(token)
+            if cached and _profile_cache_matches(
+                cached,
+                root_dir=root_dir,
+                include_tests=include_tests,
+                include_internal=include_internal,
+            ):
+                return with_project_profile_cache_metadata(cached, cached=True)
+
+    profile = profile_project(root_dir, include_tests=include_tests, include_internal=include_internal)
+    generated_at = utc_timestamp()
+    cached_profile = with_project_profile_cache_metadata(
+        profile,
+        cached=False,
+        token=expected_token,
+        generated_at=generated_at,
+        include_tests=include_tests,
+        include_internal=include_internal,
+    )
+    save_cached_project_profile(cached_profile)
+    return cached_profile
+
+
+def build_project_profile_cache_token(
+    root_dir: Path,
+    *,
+    include_tests: bool,
+    include_internal: bool,
+) -> str:
+    payload = json.dumps(
+        {
+            "root": str(root_dir.resolve()),
+            "include_tests": include_tests,
+            "include_internal": include_internal,
+            "version": PROJECT_PROFILE_CACHE_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def load_cached_project_profile(profile_token: str) -> dict[str, Any] | None:
+    path = get_project_profile_cache_path(profile_token)
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_cached_project_profile(project_profile: dict[str, Any]) -> None:
+    cache = project_profile.get("cache", {})
+    token = cache.get("token", "")
+    if not token:
+        return
+    path = get_project_profile_cache_path(token)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(project_profile, file, indent=2, ensure_ascii=True)
+        file.write("\n")
+
+
+def get_project_profile_cache_path(profile_token: str) -> Path:
+    return get_cache_dir() / "project_profiles" / f"{profile_token}.json"
+
+
+def with_project_profile_cache_metadata(
+    project_profile: dict[str, Any],
+    *,
+    cached: bool,
+    token: str | None = None,
+    generated_at: str | None = None,
+    include_tests: bool | None = None,
+    include_internal: bool | None = None,
+) -> dict[str, Any]:
+    profile = deepcopy(project_profile)
+    existing_cache = profile.get("cache", {}) if isinstance(profile.get("cache", {}), dict) else {}
+    profile["cache"] = {
+        "token": token or existing_cache.get("token", ""),
+        "generated_at": generated_at or existing_cache.get("generated_at", ""),
+        "cached": cached,
+        "include_tests": include_tests if include_tests is not None else bool(existing_cache.get("include_tests", False)),
+        "include_internal": include_internal if include_internal is not None else bool(existing_cache.get("include_internal", True)),
+        "version": PROJECT_PROFILE_CACHE_VERSION,
+    }
+    return profile
+
+
+def _profile_cache_matches(
+    project_profile: dict[str, Any],
+    *,
+    root_dir: Path,
+    include_tests: bool,
+    include_internal: bool,
+) -> bool:
+    cache = project_profile.get("cache", {})
+    if project_profile.get("root") != str(root_dir):
+        return False
+    return (
+        bool(cache.get("include_tests", False)) == include_tests
+        and bool(cache.get("include_internal", True)) == include_internal
+    )
 
 
 def is_ignored_project_dir_name(name: str) -> bool:

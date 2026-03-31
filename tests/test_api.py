@@ -1386,6 +1386,158 @@ Columns:
         self.assertEqual(payload["summary"]["manifests"], 1)
         self.assertEqual(payload["summary"]["data_assets"], 1)
 
+    def test_project_profile_endpoint_reuses_cached_discovery_until_force_refresh(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        route_path = backend_dir / "cached_routes.py"
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/cached-one")
+def cached_one():
+    return {"cached_one": 1}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        first = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(first.status_code, 200)
+        first_profile = first.json()["project_profile"]
+        self.assertFalse(first_profile["cache"]["cached"])
+        first_routes = {hint["route"] for hint in first_profile["api_contract_hints"]}
+        self.assertIn("GET /api/cached-one", first_routes)
+
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/cached-one")
+def cached_one():
+    return {"cached_one": 1}
+
+@router.get("/api/cached-two")
+def cached_two():
+    return {"cached_two": 2}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        cached = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(cached.status_code, 200)
+        cached_profile = cached.json()["project_profile"]
+        self.assertTrue(cached_profile["cache"]["cached"])
+        cached_routes = {hint["route"] for hint in cached_profile["api_contract_hints"]}
+        self.assertNotIn("GET /api/cached-two", cached_routes)
+
+        refreshed = self.client.get(
+            "/api/project/profile",
+            params={"include_internal": "false", "force_refresh": "true"},
+        )
+        self.assertEqual(refreshed.status_code, 200)
+        refreshed_profile = refreshed.json()["project_profile"]
+        self.assertFalse(refreshed_profile["cache"]["cached"])
+        refreshed_routes = {hint["route"] for hint in refreshed_profile["api_contract_hints"]}
+        self.assertIn("GET /api/cached-two", refreshed_routes)
+
+    def test_project_hint_import_can_use_cached_profile_token(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        route_path = backend_dir / "token_import.py"
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/token-import")
+def token_import():
+    return {"token_value": 1}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        profile_response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(profile_response.status_code, 200)
+        project_profile = profile_response.json()["project_profile"]
+        hint = next(hint for hint in project_profile["api_contract_hints"] if hint["route"] == "GET /api/token-import")
+        token = project_profile["cache"]["token"]
+        route_path.unlink()
+
+        graph = self.client.get("/api/graph").json()["graph"]
+        import_response = self.client.post(
+            "/api/import/project-hint",
+            json={
+                "graph": graph,
+                "hint_kind": "api",
+                "hint_id": hint["id"],
+                "profile_token": token,
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(import_response.status_code, 200)
+        imported_graph = import_response.json()["graph"]
+        self.assertTrue(
+            any(
+                node["kind"] == "contract"
+                and node.get("contract", {}).get("route") == "GET /api/token-import"
+                for node in imported_graph["nodes"]
+            )
+        )
+
+    def test_project_bootstrap_can_use_cached_profile_token(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        route_path = backend_dir / "token_bootstrap.py"
+        route_path.write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/token-bootstrap")
+def token_bootstrap():
+    return {"bootstrap_value": 1}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        profile_response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(profile_response.status_code, 200)
+        project_profile = profile_response.json()["project_profile"]
+        hint = next(hint for hint in project_profile["api_contract_hints"] if hint["route"] == "GET /api/token-bootstrap")
+        token = project_profile["cache"]["token"]
+        route_path.unlink()
+
+        graph = self.client.get("/api/graph").json()["graph"]
+        bootstrap_response = self.client.post(
+            "/api/import/project-bootstrap",
+            json={
+                "graph": graph,
+                "profile_token": token,
+                "root_path": str(self.root),
+                "include_internal": False,
+                "api_hint_ids": [hint["id"]],
+                "import_assets": False,
+                "import_api_hints": True,
+                "import_ui_hints": False,
+            },
+        )
+        self.assertEqual(bootstrap_response.status_code, 200)
+        imported_graph = bootstrap_response.json()["graph"]
+        self.assertTrue(
+            any(
+                node["kind"] == "contract"
+                and node.get("contract", {}).get("route") == "GET /api/token-bootstrap"
+                for node in imported_graph["nodes"]
+            )
+        )
+
     def test_project_directories_endpoint_returns_matching_directories(self) -> None:
         nested_root = self.root / "examples" / "client_app"
         nested_root.mkdir(parents=True, exist_ok=True)

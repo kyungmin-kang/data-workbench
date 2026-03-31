@@ -61,6 +61,18 @@ const state = {
     apiHints: true,
     uiHints: true,
   },
+  projectProfileFilters: {
+    assetsQuery: "",
+    assetsStatus: "all",
+    contractsQuery: "",
+  },
+  projectProfilePages: {
+    assets: 1,
+    api: 1,
+    ui: 1,
+    sql: 1,
+    orm: 1,
+  },
   searchTerm: "",
   kindFilter: "all",
   featureSortMode: "category",
@@ -4504,6 +4516,92 @@ function renderHintFieldSummary(fields) {
   return `fields: ${escapeHtml(fields.join(", "))}`;
 }
 
+function normalizeProjectDiscoveryQuery(value) {
+  return (value || "").trim().toLowerCase();
+}
+
+function matchesProjectDiscoveryQuery(values, query) {
+  if (!query) {
+    return true;
+  }
+  return values.some((value) => String(value || "").toLowerCase().includes(query));
+}
+
+function filterProjectAssets(dataAssets) {
+  const query = normalizeProjectDiscoveryQuery(state.projectProfileFilters.assetsQuery);
+  const status = state.projectProfileFilters.assetsStatus || "all";
+  return dataAssets.filter((asset) => {
+    if (status === "suggested" && !asset.suggested_import) {
+      return false;
+    }
+    if (status !== "all" && status !== "suggested" && (asset.profile_status || "unknown") !== status) {
+      return false;
+    }
+    return matchesProjectDiscoveryQuery(
+      [
+        asset.path,
+        asset.format,
+        asset.profile_status,
+        asset.suggested_import?.source_label,
+        asset.suggested_import?.data_label,
+        ...(asset.columns || []).map((column) => `${column.name} ${column.data_type}`),
+      ],
+      query,
+    );
+  });
+}
+
+function filterProjectHints(hints, valuesForHint) {
+  const query = normalizeProjectDiscoveryQuery(state.projectProfileFilters.contractsQuery);
+  return hints.filter((hint) => matchesProjectDiscoveryQuery(valuesForHint(hint), query));
+}
+
+function getProjectProfilePage(pageKey) {
+  return Math.max(1, state.projectProfilePages?.[pageKey] || 1);
+}
+
+function setProjectProfilePage(pageKey, nextPage) {
+  state.projectProfilePages = {
+    ...(state.projectProfilePages || {}),
+    [pageKey]: Math.max(1, nextPage),
+  };
+}
+
+function resetProjectProfilePages() {
+  state.projectProfilePages = {
+    assets: 1,
+    api: 1,
+    ui: 1,
+    sql: 1,
+    orm: 1,
+  };
+}
+
+function paginateProjectDiscovery(items, pageKey, pageSize) {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.min(getProjectProfilePage(pageKey), totalPages);
+  setProjectProfilePage(pageKey, page);
+  const offset = (page - 1) * pageSize;
+  return {
+    page,
+    totalPages,
+    items: items.slice(offset, offset + pageSize),
+  };
+}
+
+function renderProjectDiscoveryPager(pageKey, page, totalPages) {
+  if (totalPages <= 1) {
+    return "";
+  }
+  return `
+    <div class="section-actions" style="margin-top: 14px; justify-content: center;">
+      <button class="ghost-button" type="button" data-project-page-key="${escapeHtml(pageKey)}" data-project-page-move="prev" ${page <= 1 ? "disabled" : ""}>Prev Page</button>
+      <span class="hint" style="margin: 0 16px;">Page ${page} of ${totalPages}</span>
+      <button class="ghost-button" type="button" data-project-page-key="${escapeHtml(pageKey)}" data-project-page-move="next" ${page >= totalPages ? "disabled" : ""}>Next Page</button>
+    </div>
+  `;
+}
+
 function describeBootstrapScope({
   selectableCount,
   selectedAssetCount,
@@ -4524,14 +4622,14 @@ function describeBootstrapScope({
     parts.push(
       selectedApiHintCount
         ? `${selectedApiHintCount} selected API hint${selectedApiHintCount === 1 ? "" : "s"}`
-        : `${apiHintCount} visible API hint${apiHintCount === 1 ? "" : "s"}`
+        : `${apiHintCount} available API hint${apiHintCount === 1 ? "" : "s"}`
     );
   }
   if (state.projectBootstrapOptions.uiHints) {
     parts.push(
       selectedUiHintCount
         ? `${selectedUiHintCount} selected UI hint${selectedUiHintCount === 1 ? "" : "s"}`
-        : `${uiHintCount} visible UI hint${uiHintCount === 1 ? "" : "s"}`
+        : `${uiHintCount} available UI hint${uiHintCount === 1 ? "" : "s"}`
     );
   }
   if (!parts.length) {
@@ -8596,6 +8694,44 @@ function renderProjectProfile() {
   const uiHints = profile?.ui_contract_hints || [];
   const sqlHints = profile?.sql_structure_hints || [];
   const ormHints = profile?.orm_structure_hints || [];
+  const filteredDataAssets = filterProjectAssets(dataAssets);
+  const filteredApiHints = filterProjectHints(apiHints, (hint) => [
+    hint.id,
+    hint.label,
+    hint.route,
+    hint.file,
+    hint.detected_from,
+    ...(hint.response_fields || []),
+  ]);
+  const filteredUiHints = filterProjectHints(uiHints, (hint) => [
+    hint.id,
+    hint.label,
+    hint.component,
+    hint.file,
+    hint.detected_from,
+    ...(hint.api_routes || []),
+    ...(hint.used_fields || []),
+  ]);
+  const filteredSqlHints = filterProjectHints(sqlHints, (hint) => [
+    hint.id,
+    hint.label,
+    hint.relation,
+    hint.object_type,
+    hint.file,
+    hint.detected_from,
+    ...((hint.fields || []).map((field) => field.name)),
+    ...(hint.upstream_relations || []),
+  ]);
+  const filteredOrmHints = filterProjectHints(ormHints, (hint) => [
+    hint.id,
+    hint.label,
+    hint.relation,
+    hint.object_type,
+    hint.file,
+    hint.detected_from,
+    ...((hint.fields || []).map((field) => field.name)),
+    ...(hint.upstream_relations || []),
+  ]);
   const selectedPaths = new Set(state.selectedProjectImports || []);
   const selectedApiHints = new Set(state.selectedProjectApiHints || []);
   const selectedUiHints = new Set(state.selectedProjectUiHints || []);
@@ -8616,8 +8752,8 @@ function renderProjectProfile() {
   projectProfileSummary.innerHTML = `
     ${renderProjectWizardNav()}
     ${state.projectWizardStep === 1 ? renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootstrapCount) : ""}
-    ${state.projectWizardStep === 2 ? renderProjectWizardAssetsStep(dataAssets, selectedPaths, selectableCount) : ""}
-    ${state.projectWizardStep === 3 ? renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints, selectedApiHints, selectedUiHints) : ""}
+    ${state.projectWizardStep === 2 ? renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedPaths, selectableCount) : ""}
+    ${state.projectWizardStep === 3 ? renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints, filteredApiHints, filteredUiHints, filteredSqlHints, filteredOrmHints, selectedApiHints, selectedUiHints) : ""}
     ${state.projectWizardStep === 4 ? renderProjectWizardReviewStep(profile, summary, bootstrapSummary, bootstrapCount, sqlHints, ormHints) : ""}
     ${renderProjectWizardFooter(Boolean(profile))}
   `;
@@ -8648,6 +8784,10 @@ function renderProjectWizardNav() {
 
 function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootstrapCount) {
   const presets = state.onboardingPresets || [];
+  const cacheMeta = profile?.cache || {};
+  const cacheSummary = cacheMeta.generated_at
+    ? `${cacheMeta.cached ? "Loaded cached discovery" : "Fresh discovery"} from ${cacheMeta.generated_at}`
+    : "";
   return `
     <div class="section">
       <div class="section-actions">
@@ -8675,6 +8815,7 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="uiHints" ${state.projectBootstrapOptions.uiHints ? "checked" : ""} /> bootstrap UI hints</label>
       </div>
       <p class="hint">${escapeHtml(bootstrapSummary)}</p>
+      ${cacheSummary ? `<p class="hint">${escapeHtml(cacheSummary)}</p>` : ""}
       ${profile ? `
         <div class="meta-grid">
           <div><strong>Manifests</strong><br>${formatValue(summary.manifests)}</div>
@@ -8724,26 +8865,43 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
   `;
 }
 
-function renderProjectWizardAssetsStep(dataAssets, selectedPaths, selectableCount) {
+function renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedPaths, selectableCount) {
   const PAGE_SIZE = 50;
-  state.wizardAssetsPage = state.wizardAssetsPage || 1;
-  const totalPages = Math.max(1, Math.ceil(dataAssets.length / PAGE_SIZE));
-  const page = Math.min(Math.max(1, state.wizardAssetsPage), totalPages);
-  const offset = (page - 1) * PAGE_SIZE;
-  const pagedAssets = dataAssets.slice(offset, offset + PAGE_SIZE);
+  const visibleSelectableCount = filteredDataAssets.filter((asset) => asset.suggested_import).length;
+  const assetPage = paginateProjectDiscovery(filteredDataAssets, "assets", PAGE_SIZE);
   return `
     <div class="section">
       <div class="section-actions">
-        <h3>Step 2. Data Assets <span class="hint">(${dataAssets.length} total)</span></h3>
+        <h3>Step 2. Data Assets <span class="hint">(${filteredDataAssets.length} shown / ${dataAssets.length} total)</span></h3>
         <div class="row-actions">
           <span class="hint">${formatValue(selectedPaths.size)} selected / ${formatValue(selectableCount)} suggested</span>
-          <button class="ghost-button" type="button" data-project-select-all="true">Select all suggested</button>
+          <button class="ghost-button" type="button" data-project-select-all="true">Select visible suggested</button>
           <button class="ghost-button" type="button" data-project-clear-selection="true">Clear selection</button>
           <button class="ghost-button" type="button" data-project-import-selected="true" ${selectedPaths.size ? "" : "disabled"}>Import selected now</button>
         </div>
       </div>
+      <div class="form-grid compact">
+        <label class="form-field">
+          Filter assets
+          <input data-project-filter="assetsQuery" value="${escapeHtml(state.projectProfileFilters.assetsQuery || "")}" placeholder="path, column, source label" />
+        </label>
+        <label class="form-field">
+          Status
+          <select data-project-filter="assetsStatus">
+            <option value="all" ${state.projectProfileFilters.assetsStatus === "all" ? "selected" : ""}>All assets</option>
+            <option value="suggested" ${state.projectProfileFilters.assetsStatus === "suggested" ? "selected" : ""}>Suggested only</option>
+            <option value="profiled" ${state.projectProfileFilters.assetsStatus === "profiled" ? "selected" : ""}>Profiled</option>
+            <option value="sampled_profile" ${state.projectProfileFilters.assetsStatus === "sampled_profile" ? "selected" : ""}>Sampled</option>
+            <option value="schema_only" ${state.projectProfileFilters.assetsStatus === "schema_only" ? "selected" : ""}>Schema only</option>
+            <option value="unknown" ${state.projectProfileFilters.assetsStatus === "unknown" ? "selected" : ""}>Unknown</option>
+          </select>
+        </label>
+      </div>
+      ${(state.projectProfileFilters.assetsQuery || state.projectProfileFilters.assetsStatus !== "all")
+        ? `<p class="hint">Showing ${formatValue(filteredDataAssets.length)} asset${filteredDataAssets.length === 1 ? "" : "s"} from ${formatValue(dataAssets.length)} total. ${formatValue(visibleSelectableCount)} visible asset${visibleSelectableCount === 1 ? "" : "s"} can be imported.</p>`
+        : ""}
       <div class="column-list">
-        ${pagedAssets.length ? pagedAssets.map((asset) => `
+        ${assetPage.items.length ? assetPage.items.map((asset) => `
           <div class="column-row">
             <div class="column-head">
               <div class="column-main">${escapeHtml(asset.path || "unknown")}</div>
@@ -8762,30 +8920,51 @@ function renderProjectWizardAssetsStep(dataAssets, selectedPaths, selectableCoun
           </div>
         `).join("") : "<p>No data assets were detected. Run discovery again or widen the scope filters.</p>"}
       </div>
-      ${totalPages > 1 ? `
-      <div class="section-actions" style="margin-top: 14px; justify-content: center;">
-        <button class="ghost-button" type="button" data-assets-page="prev" ${page <= 1 ? "disabled" : ""}>Prev Page</button>
-        <span class="hint" style="margin: 0 16px;">Page ${page} of ${totalPages}</span>
-        <button class="ghost-button" type="button" data-assets-page="next" ${page >= totalPages ? "disabled" : ""}>Next Page</button>
-      </div>
-      ` : ""}
+      ${renderProjectDiscoveryPager("assets", assetPage.page, assetPage.totalPages)}
     </div>
   `;
 }
 
-function renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints, selectedApiHints, selectedUiHints) {
+function renderProjectWizardContractsStep(
+  apiHints,
+  uiHints,
+  sqlHints,
+  ormHints,
+  filteredApiHints,
+  filteredUiHints,
+  filteredSqlHints,
+  filteredOrmHints,
+  selectedApiHints,
+  selectedUiHints,
+) {
+  const PAGE_SIZE = 25;
+  const apiPage = paginateProjectDiscovery(filteredApiHints, "api", PAGE_SIZE);
+  const uiPage = paginateProjectDiscovery(filteredUiHints, "ui", PAGE_SIZE);
+  const sqlPage = paginateProjectDiscovery(filteredSqlHints, "sql", PAGE_SIZE);
+  const ormPage = paginateProjectDiscovery(filteredOrmHints, "orm", PAGE_SIZE);
   return `
     <div class="section">
+      <div class="form-grid compact">
+        <label class="form-field form-field-full">
+          Filter contracts and structure hints
+          <input data-project-filter="contractsQuery" value="${escapeHtml(state.projectProfileFilters.contractsQuery || "")}" placeholder="route, component, relation, field, file" />
+        </label>
+      </div>
+      ${state.projectProfileFilters.contractsQuery
+        ? `<p class="hint">Showing ${formatValue(filteredApiHints.length)} API, ${formatValue(filteredUiHints.length)} UI, ${formatValue(filteredSqlHints.length)} SQL, and ${formatValue(filteredOrmHints.length)} ORM hints that match the current filter.</p>`
+        : ""}
+    </div>
+    <div class="section">
       <div class="section-actions">
-        <h3>Step 3. API Contracts</h3>
+        <h3>Step 3. API Contracts <span class="hint">(${filteredApiHints.length} shown / ${apiHints.length} total)</span></h3>
         <div class="row-actions">
           <span class="hint">${formatValue(selectedApiHints.size)} selected / ${formatValue(apiHints.length)}</span>
-          <button class="ghost-button" type="button" data-project-api-select-all="true">Select all</button>
+          <button class="ghost-button" type="button" data-project-api-select-all="true">Select visible</button>
           <button class="ghost-button" type="button" data-project-api-clear="true">Clear</button>
         </div>
       </div>
       <div class="column-list">
-        ${apiHints.length ? apiHints.map((hint) => `
+        ${apiPage.items.length ? apiPage.items.map((hint) => `
           <div class="column-row">
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.route || hint.label || "unknown route")}</div>
@@ -8799,18 +8978,19 @@ function renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints,
           </div>
         `).join("") : "<p>No API contract hints detected.</p>"}
       </div>
+      ${renderProjectDiscoveryPager("api", apiPage.page, apiPage.totalPages)}
     </div>
     <div class="section">
       <div class="section-actions">
-        <h3>Step 3. UI Consumers</h3>
+        <h3>Step 3. UI Consumers <span class="hint">(${filteredUiHints.length} shown / ${uiHints.length} total)</span></h3>
         <div class="row-actions">
           <span class="hint">${formatValue(selectedUiHints.size)} selected / ${formatValue(uiHints.length)}</span>
-          <button class="ghost-button" type="button" data-project-ui-select-all="true">Select all</button>
+          <button class="ghost-button" type="button" data-project-ui-select-all="true">Select visible</button>
           <button class="ghost-button" type="button" data-project-ui-clear="true">Clear</button>
         </div>
       </div>
       <div class="column-list">
-        ${uiHints.length ? uiHints.map((hint) => `
+        ${uiPage.items.length ? uiPage.items.map((hint) => `
           <div class="column-row">
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.component || hint.label || "unknown component")}</div>
@@ -8824,14 +9004,14 @@ function renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints,
           </div>
         `).join("") : "<p>No UI consumer hints detected.</p>"}
       </div>
+      ${renderProjectDiscoveryPager("ui", uiPage.page, uiPage.totalPages)}
     </div>
     <div class="section">
       <div class="section-actions">
-        <h3>Step 3. SQL Structure</h3>
-        <span class="hint">${formatValue(sqlHints.length)} inferred relation${sqlHints.length === 1 ? "" : "s"}</span>
+        <h3>Step 3. SQL Structure <span class="hint">(${filteredSqlHints.length} shown / ${sqlHints.length} total)</span></h3>
       </div>
       <div class="column-list">
-        ${sqlHints.length ? sqlHints.map((hint) => `
+        ${sqlPage.items.length ? sqlPage.items.map((hint) => `
           <div class="column-row">
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.relation || hint.label || "unknown relation")}</div>
@@ -8845,14 +9025,14 @@ function renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints,
           </div>
         `).join("") : "<p>No SQL structure hints detected.</p>"}
       </div>
+      ${renderProjectDiscoveryPager("sql", sqlPage.page, sqlPage.totalPages)}
     </div>
     <div class="section">
       <div class="section-actions">
-        <h3>Step 3. ORM Structure</h3>
-        <span class="hint">${formatValue(ormHints.length)} inferred model${ormHints.length === 1 ? "" : "s"}</span>
+        <h3>Step 3. ORM Structure <span class="hint">(${filteredOrmHints.length} shown / ${ormHints.length} total)</span></h3>
       </div>
       <div class="column-list">
-        ${ormHints.length ? ormHints.map((hint) => `
+        ${ormPage.items.length ? ormPage.items.map((hint) => `
           <div class="column-row">
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.relation || hint.label || "unknown model")}</div>
@@ -8866,6 +9046,7 @@ function renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints,
           </div>
         `).join("") : "<p>No ORM structure hints detected.</p>"}
       </div>
+      ${renderProjectDiscoveryPager("orm", ormPage.page, ormPage.totalPages)}
     </div>
   `;
 }
@@ -10052,19 +10233,17 @@ function handleProjectProfileClick(event) {
     renderProjectProfile();
     return;
   }
-  const assetsPageButton = target.closest("[data-assets-page]");
-  if (assetsPageButton instanceof HTMLElement && assetsPageButton.dataset.assetsPage === "prev") {
-    state.wizardAssetsPage = Math.max(1, (state.wizardAssetsPage || 1) - 1);
-    renderProjectProfile();
-    return;
-  }
-  if (assetsPageButton instanceof HTMLElement && assetsPageButton.dataset.assetsPage === "next") {
-    state.wizardAssetsPage = (state.wizardAssetsPage || 1) + 1;
+  const pageButton = target.closest("[data-project-page-key]");
+  if (pageButton instanceof HTMLElement && pageButton.dataset.projectPageMove) {
+    const pageKey = pageButton.dataset.projectPageKey;
+    const currentPage = getProjectProfilePage(pageKey);
+    const nextPage = pageButton.dataset.projectPageMove === "prev" ? currentPage - 1 : currentPage + 1;
+    setProjectProfilePage(pageKey, nextPage);
     renderProjectProfile();
     return;
   }
   if (target.dataset.projectSelectAll) {
-    state.selectedProjectImports = (state.projectProfile?.data_assets || [])
+    state.selectedProjectImports = filterProjectAssets(state.projectProfile?.data_assets || [])
       .filter((asset) => asset.suggested_import)
       .map((asset) => asset.path);
     renderProjectProfile();
@@ -10078,7 +10257,10 @@ function handleProjectProfileClick(event) {
     return;
   }
   if (target.dataset.projectApiSelectAll) {
-    state.selectedProjectApiHints = (state.projectProfile?.api_contract_hints || []).map((hint) => hint.id);
+    state.selectedProjectApiHints = filterProjectHints(
+      state.projectProfile?.api_contract_hints || [],
+      (hint) => [hint.id, hint.label, hint.route, hint.file, ...(hint.response_fields || [])],
+    ).map((hint) => hint.id);
     renderProjectProfile();
     setStatus("API hints selected", `${state.selectedProjectApiHints.length} API hint${state.selectedProjectApiHints.length === 1 ? "" : "s"} selected for bootstrap.`);
     return;
@@ -10090,7 +10272,10 @@ function handleProjectProfileClick(event) {
     return;
   }
   if (target.dataset.projectUiSelectAll) {
-    state.selectedProjectUiHints = (state.projectProfile?.ui_contract_hints || []).map((hint) => hint.id);
+    state.selectedProjectUiHints = filterProjectHints(
+      state.projectProfile?.ui_contract_hints || [],
+      (hint) => [hint.id, hint.label, hint.component, hint.file, ...(hint.api_routes || []), ...(hint.used_fields || [])],
+    ).map((hint) => hint.id);
     renderProjectProfile();
     setStatus("UI hints selected", `${state.selectedProjectUiHints.length} UI hint${state.selectedProjectUiHints.length === 1 ? "" : "s"} selected for bootstrap.`);
     return;
@@ -10122,7 +10307,7 @@ function handleProjectProfileClick(event) {
     return;
   }
   if (target.dataset.projectRescan) {
-    loadProjectProfile();
+    loadProjectProfileWithOptions({ forceRefresh: true });
     return;
   }
   if (target.dataset.projectRootPicker) {
@@ -10149,6 +10334,12 @@ function handleProjectProfileClick(event) {
 function handleProjectProfileMutation(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  if ((target instanceof HTMLInputElement || target instanceof HTMLSelectElement) && target.dataset.projectFilter) {
+    state.projectProfileFilters[target.dataset.projectFilter] = target.value;
+    resetProjectProfilePages();
+    renderProjectProfile();
     return;
   }
   if (target instanceof HTMLSelectElement && target.dataset.projectPresetSelect) {
@@ -10209,6 +10400,9 @@ async function loadProjectProfileWithOptions(options = {}) {
     include_tests: includeTests ? "true" : "false",
     include_internal: includeInternal ? "true" : "false",
   });
+  if (options.forceRefresh) {
+    params.set("force_refresh", "true");
+  }
   if (rootPath) {
     params.set("root_path", rootPath);
   }
@@ -10223,6 +10417,7 @@ async function loadProjectProfileWithOptions(options = {}) {
   state.projectProfileOptions.includeTests = includeTests;
   state.projectProfileOptions.includeInternal = includeInternal;
   state.projectProfileOptions.rootPath = state.projectProfile?.root || rootPath || "";
+  resetProjectProfilePages();
   if (options.preset) {
     applyProjectPresetSelections(options.preset);
   } else {
@@ -10684,6 +10879,7 @@ async function importProjectBootstrap() {
       graph: state.graph,
       include_tests: state.projectProfileOptions.includeTests,
       include_internal: state.projectProfileOptions.includeInternal,
+      profile_token: state.projectProfile?.cache?.token || "",
       root_path: state.projectProfileOptions.rootPath || "",
       asset_paths: selectedPaths,
       api_hint_ids: apiHintIds,
@@ -10842,6 +11038,7 @@ async function importProjectHint(hintKind, hintId) {
       graph: state.graph,
       hint_kind: hintKind,
       hint_id: hintId,
+      profile_token: state.projectProfile?.cache?.token || "",
       root_path: state.projectProfileOptions.rootPath || "",
       include_tests: state.projectProfileOptions.includeTests,
       include_internal: state.projectProfileOptions.includeInternal,

@@ -18,7 +18,7 @@ from .onboarding_presets import OnboardingPreset, delete_onboarding_preset, load
 from .openapi_importer import OpenAPIImportSpec, import_openapi_into_graph
 from .project_bootstrap import bootstrap_project_into_graph
 from .profile import profile_graph
-from .project_profiler import is_ignored_project_dir_name, profile_project
+from .project_profiler import is_ignored_project_dir_name, resolve_project_profile
 from .store import ROOT_DIR, export_canonical_yaml_text, get_root_dir, list_bundles, load_bundle, load_graph, load_latest_plan, save_graph, write_plan_artifacts
 from .structure_memory import (
     build_structure_summary,
@@ -88,6 +88,7 @@ class ProjectHintImportRequest(BaseModel):
     graph: dict[str, Any]
     hint_kind: str
     hint_id: str
+    profile_token: str | None = None
     root_path: str | None = None
     include_tests: bool = False
     include_internal: bool = True
@@ -97,6 +98,7 @@ class ProjectBootstrapRequest(BaseModel):
     graph: dict[str, Any]
     include_tests: bool = False
     include_internal: bool = True
+    profile_token: str | None = None
     root_path: str | None = None
     asset_paths: list[str] = []
     api_hint_ids: list[str] = []
@@ -387,13 +389,15 @@ def get_project_profile(
     include_tests: bool = False,
     include_internal: bool = True,
     root_path: str | None = None,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
     root_dir = resolve_profile_root(root_path)
     return {
-        "project_profile": profile_project(
+        "project_profile": resolve_project_profile(
             root_dir,
             include_tests=include_tests,
             include_internal=include_internal,
+            force_refresh=force_refresh,
         )
     }
 
@@ -526,10 +530,11 @@ def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str,
     try:
         graph = validate_graph(payload.graph)
         root_dir = resolve_profile_root(payload.root_path)
-        project_profile = profile_project(
+        project_profile = resolve_project_profile(
             root_dir,
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
+            profile_token=payload.profile_token,
         )
         if payload.hint_kind == "api":
             hint = next(
@@ -573,9 +578,16 @@ def import_project_bootstrap_endpoint(payload: ProjectBootstrapRequest) -> dict[
     try:
         graph = validate_graph(payload.graph)
         root_dir = resolve_profile_root(payload.root_path)
+        project_profile = resolve_project_profile(
+            root_dir,
+            include_tests=payload.include_tests,
+            include_internal=payload.include_internal,
+            profile_token=payload.profile_token,
+        )
         imported = bootstrap_project_into_graph(
             graph,
             root_dir,
+            project_profile=project_profile,
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
             asset_paths=payload.asset_paths,

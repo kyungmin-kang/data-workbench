@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
+import importlib
 import os
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,152 @@ from .types import PATCH_TYPE_PRECEDENCE, ScanBundle, normalize_graph
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+GRAPH_JSON_KEY = "graphs/current.json"
+GRAPH_YAML_KEY = "graphs/current.yaml"
+LATEST_PLAN_JSON_KEY = "plans/latest.plan.json"
+LATEST_PLAN_MARKDOWN_KEY = "plans/latest.plan.md"
+ONBOARDING_PRESETS_KEY = "presets/onboarding.json"
+BUNDLE_PREFIX = "bundles/"
+
+
+class PostgresDocumentStore:
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        try:
+            self.psycopg = importlib.import_module("psycopg")
+        except ModuleNotFoundError as error:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "Postgres persistence requires psycopg. Install the project with the 'persistence' extra."
+            ) from error
+        self._schema_ready = False
+
+    def _connect(self):
+        return self.psycopg.connect(self.dsn)
+
+    def _ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workbench_documents (
+                        key TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        content_type TEXT NOT NULL DEFAULT 'text/plain',
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+        self._schema_ready = True
+
+    def read_text(self, key: str) -> str | None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT content FROM workbench_documents WHERE key = %s", (key,))
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return str(row[0])
+
+    def write_text(self, key: str, content: str, *, content_type: str = "text/plain") -> None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO workbench_documents (key, content, content_type, updated_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (key)
+                    DO UPDATE SET
+                        content = EXCLUDED.content,
+                        content_type = EXCLUDED.content_type,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (key, content, content_type),
+                )
+
+    def list_documents(self, prefix: str) -> list[tuple[str, str]]:
+        self._ensure_schema()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT key, content FROM workbench_documents WHERE key LIKE %s ORDER BY key",
+                    (f"{prefix}%",),
+                )
+                rows = cursor.fetchall() or []
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+
+class MinioObjectStore:
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        access_key: str,
+        secret_key: str,
+        bucket_name: str,
+        secure: bool,
+    ) -> None:
+        try:
+            minio_module = importlib.import_module("minio")
+            error_module = importlib.import_module("minio.error")
+        except ModuleNotFoundError as error:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "MinIO persistence requires the minio package. Install the project with the 'persistence' extra."
+            ) from error
+        self.client = minio_module.Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=secure,
+        )
+        self.bucket_name = bucket_name
+        self.s3_error = error_module.S3Error
+        self._bucket_ready = False
+
+    def _ensure_bucket(self) -> None:
+        if self._bucket_ready:
+            return
+        if not self.client.bucket_exists(self.bucket_name):
+            self.client.make_bucket(self.bucket_name)
+        self._bucket_ready = True
+
+    def read_text(self, key: str) -> str | None:
+        self._ensure_bucket()
+        response = None
+        try:
+            response = self.client.get_object(self.bucket_name, key)
+            return response.read().decode("utf-8")
+        except self.s3_error as error:
+            if getattr(error, "code", "") in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}:
+                return None
+            raise
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
+
+    def write_text(self, key: str, content: str, *, content_type: str = "text/plain") -> None:
+        self._ensure_bucket()
+        payload = content.encode("utf-8")
+        self.client.put_object(
+            self.bucket_name,
+            key,
+            io.BytesIO(payload),
+            length=len(payload),
+            content_type=content_type,
+        )
+
+    def list_documents(self, prefix: str) -> list[tuple[str, str]]:
+        self._ensure_bucket()
+        items: list[tuple[str, str]] = []
+        for entry in self.client.list_objects(self.bucket_name, prefix=prefix, recursive=True):
+            content = self.read_text(entry.object_name)
+            if content is not None:
+                items.append((entry.object_name, content))
+        return items
 
 
 def get_root_dir() -> Path:
@@ -47,11 +196,102 @@ def get_onboarding_presets_path() -> Path:
     return get_root_dir() / "specs" / "onboarding_presets.json"
 
 
+def get_persistence_backend() -> str:
+    backend = (os.environ.get("WORKBENCH_PERSISTENCE_BACKEND") or "local").strip().lower()
+    if backend not in {"local", "postgres", "mirror"}:
+        return "local"
+    return backend
+
+
+def local_persistence_enabled() -> bool:
+    return get_persistence_backend() in {"local", "mirror"}
+
+
+def postgres_persistence_enabled() -> bool:
+    return get_persistence_backend() in {"postgres", "mirror"}
+
+
+def object_store_enabled() -> bool:
+    backend = (os.environ.get("WORKBENCH_OBJECT_STORE_BACKEND") or "").strip().lower()
+    return backend in {"minio", "mirror"}
+
+
+def get_persistence_prefix() -> str:
+    return (os.environ.get("WORKBENCH_PERSISTENCE_PREFIX") or "").strip().strip("/")
+
+
+def storage_key(key: str) -> str:
+    normalized = key.lstrip("/")
+    prefix = get_persistence_prefix()
+    return f"{prefix}/{normalized}" if prefix else normalized
+
+
+def strip_storage_prefix(key: str) -> str:
+    normalized = key.lstrip("/")
+    prefix = get_persistence_prefix()
+    marker = f"{prefix}/"
+    if prefix and normalized.startswith(marker):
+        return normalized[len(marker):]
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _get_postgres_document_store() -> PostgresDocumentStore:
+    dsn = (os.environ.get("WORKBENCH_POSTGRES_DSN") or "").strip()
+    if not dsn:
+        raise RuntimeError("WORKBENCH_POSTGRES_DSN is required when Postgres persistence is enabled.")
+    return PostgresDocumentStore(dsn)
+
+
+@lru_cache(maxsize=1)
+def _get_object_store() -> MinioObjectStore:
+    endpoint = (os.environ.get("WORKBENCH_MINIO_ENDPOINT") or "").strip()
+    access_key = (os.environ.get("WORKBENCH_MINIO_ACCESS_KEY") or "").strip()
+    secret_key = (os.environ.get("WORKBENCH_MINIO_SECRET_KEY") or "").strip()
+    bucket_name = (os.environ.get("WORKBENCH_MINIO_BUCKET") or "").strip()
+    secure = (os.environ.get("WORKBENCH_MINIO_SECURE") or "0").strip() not in {"0", "false", "False"}
+    if not endpoint or not access_key or not secret_key or not bucket_name:
+        raise RuntimeError(
+            "WORKBENCH_MINIO_ENDPOINT, WORKBENCH_MINIO_ACCESS_KEY, WORKBENCH_MINIO_SECRET_KEY, and WORKBENCH_MINIO_BUCKET are required when object storage is enabled."
+        )
+    return MinioObjectStore(
+        endpoint=endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        bucket_name=bucket_name,
+        secure=secure,
+    )
+
+
+def object_store_uri(key: str) -> str:
+    bucket_name = (os.environ.get("WORKBENCH_MINIO_BUCKET") or "").strip() or "workbench"
+    return f"minio://{bucket_name}/{storage_key(key)}"
+
+
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def load_graph(path: Path | None = None) -> dict[str, Any]:
+    if path is not None:
+        return _load_graph_local(path)
+    if postgres_persistence_enabled():
+        graph = _load_graph_postgres()
+        if graph is not None:
+            return graph
+    if object_store_enabled():
+        graph = _load_graph_object_store()
+        if graph is not None:
+            return graph
+    graph = _load_graph_local()
+    if postgres_persistence_enabled() and _local_graph_exists():
+        _persist_graph_postgres(graph)
+    if object_store_enabled() and _local_graph_exists():
+        _persist_graph_object_store(graph)
+    return graph
+
+
+def _load_graph_local(path: Path | None = None) -> dict[str, Any]:
     path = path or get_spec_path()
     if path.suffix in {".yaml", ".yml"} and path.exists():
         with path.open(encoding="utf-8") as file:
@@ -76,6 +316,28 @@ def load_graph(path: Path | None = None) -> dict[str, Any]:
     return normalize_graph({})
 
 
+def _load_graph_postgres() -> dict[str, Any] | None:
+    store = _get_postgres_document_store()
+    json_text = store.read_text(storage_key(GRAPH_JSON_KEY))
+    if json_text:
+        return normalize_graph(json.loads(json_text))
+    yaml_text = store.read_text(storage_key(GRAPH_YAML_KEY))
+    if yaml_text:
+        return normalize_graph(yaml.safe_load(yaml_text) or {})
+    return None
+
+
+def _load_graph_object_store() -> dict[str, Any] | None:
+    store = _get_object_store()
+    json_text = store.read_text(storage_key(GRAPH_JSON_KEY))
+    if json_text:
+        return normalize_graph(json.loads(json_text))
+    yaml_text = store.read_text(storage_key(GRAPH_YAML_KEY))
+    if yaml_text:
+        return normalize_graph(yaml.safe_load(yaml_text) or {})
+    return None
+
+
 def save_graph(
     graph: dict[str, Any],
     path: Path | None = None,
@@ -83,7 +345,6 @@ def save_graph(
     updated_by: str = "user",
     increment_version: bool = True,
 ) -> dict[str, Any]:
-    path = path or get_spec_path()
     graph = normalize_graph(graph)
     previous_version = int(graph.get("metadata", {}).get("structure_version") or 1)
     graph["metadata"]["updated_at"] = utc_timestamp()
@@ -93,21 +354,13 @@ def save_graph(
     else:
         graph["metadata"]["structure_version"] = previous_version
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(
-            canonical_yaml_payload(graph),
-            file,
-            sort_keys=False,
-            allow_unicode=False,
-            width=120,
-        )
-
-    legacy_path = get_legacy_spec_path()
-    legacy_path.parent.mkdir(parents=True, exist_ok=True)
-    with legacy_path.open("w", encoding="utf-8") as file:
-        json.dump(graph, file, indent=2, ensure_ascii=True)
-        file.write("\n")
+    target_path = path or get_spec_path()
+    if path is not None or local_persistence_enabled():
+        _write_graph_local(graph, target_path)
+    if path is None and postgres_persistence_enabled():
+        _persist_graph_postgres(graph)
+    if path is None and object_store_enabled():
+        _persist_graph_object_store(graph)
     return graph
 
 
@@ -134,14 +387,25 @@ def canonical_yaml_payload(graph: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_plan_artifacts(plan: dict[str, Any]) -> dict[str, str]:
-    plans_dir = get_plans_dir()
-    root_dir = get_root_dir()
-    plans_dir.mkdir(parents=True, exist_ok=True)
     timestamp = utc_timestamp().replace(":", "-")
+    artifacts = _plan_artifact_paths(timestamp)
+    if local_persistence_enabled():
+        _write_plan_artifacts_local(plan, artifacts)
+    if postgres_persistence_enabled():
+        _write_plan_artifacts_postgres(plan, timestamp)
+    if object_store_enabled():
+        _write_plan_artifacts_object_store(plan, timestamp)
+        artifacts.update(_plan_artifact_object_paths(timestamp))
+    return artifacts
+
+
+def _write_plan_artifacts_local(plan: dict[str, Any], artifacts: dict[str, str]) -> None:
+    plans_dir = get_plans_dir()
+    plans_dir.mkdir(parents=True, exist_ok=True)
     latest_json_path = plans_dir / "latest.plan.json"
     latest_markdown_path = plans_dir / "latest.plan.md"
-    timestamped_json_path = plans_dir / f"{timestamp}.plan.json"
-    timestamped_markdown_path = plans_dir / f"{timestamp}.plan.md"
+    timestamped_json_path = get_root_dir() / artifacts["timestamped_json"]
+    timestamped_markdown_path = get_root_dir() / artifacts["timestamped_markdown"]
 
     for json_path in (latest_json_path, timestamped_json_path):
         with json_path.open("w", encoding="utf-8") as file:
@@ -151,15 +415,61 @@ def write_plan_artifacts(plan: dict[str, Any]) -> dict[str, str]:
         with markdown_path.open("w", encoding="utf-8") as file:
             file.write(plan["markdown"])
 
+    return None
+
+
+def _write_plan_artifacts_postgres(plan: dict[str, Any], timestamp: str) -> None:
+    store = _get_postgres_document_store()
+    json_text = json.dumps(plan, indent=2, ensure_ascii=True) + "\n"
+    markdown_text = plan["markdown"]
+    store.write_text(storage_key(LATEST_PLAN_JSON_KEY), json_text, content_type="application/json")
+    store.write_text(storage_key(LATEST_PLAN_MARKDOWN_KEY), markdown_text, content_type="text/markdown")
+    store.write_text(storage_key(f"plans/{timestamp}.plan.json"), json_text, content_type="application/json")
+    store.write_text(storage_key(f"plans/{timestamp}.plan.md"), markdown_text, content_type="text/markdown")
+
+
+def _write_plan_artifacts_object_store(plan: dict[str, Any], timestamp: str) -> None:
+    store = _get_object_store()
+    json_text = json.dumps(plan, indent=2, ensure_ascii=True) + "\n"
+    markdown_text = plan["markdown"]
+    store.write_text(storage_key(LATEST_PLAN_JSON_KEY), json_text, content_type="application/json")
+    store.write_text(storage_key(LATEST_PLAN_MARKDOWN_KEY), markdown_text, content_type="text/markdown")
+    store.write_text(storage_key(f"plans/{timestamp}.plan.json"), json_text, content_type="application/json")
+    store.write_text(storage_key(f"plans/{timestamp}.plan.md"), markdown_text, content_type="text/markdown")
+
+
+def _plan_artifact_paths(timestamp: str) -> dict[str, str]:
     return {
-        "latest_json": str(latest_json_path.relative_to(root_dir)),
-        "latest_markdown": str(latest_markdown_path.relative_to(root_dir)),
-        "timestamped_json": str(timestamped_json_path.relative_to(root_dir)),
-        "timestamped_markdown": str(timestamped_markdown_path.relative_to(root_dir)),
+        "latest_json": "runtime/plans/latest.plan.json",
+        "latest_markdown": "runtime/plans/latest.plan.md",
+        "timestamped_json": f"runtime/plans/{timestamp}.plan.json",
+        "timestamped_markdown": f"runtime/plans/{timestamp}.plan.md",
+    }
+
+
+def _plan_artifact_object_paths(timestamp: str) -> dict[str, str]:
+    return {
+        "remote_latest_json": object_store_uri(LATEST_PLAN_JSON_KEY),
+        "remote_latest_markdown": object_store_uri(LATEST_PLAN_MARKDOWN_KEY),
+        "remote_timestamped_json": object_store_uri(f"plans/{timestamp}.plan.json"),
+        "remote_timestamped_markdown": object_store_uri(f"plans/{timestamp}.plan.md"),
     }
 
 
 def load_latest_plan() -> dict[str, Any] | None:
+    if postgres_persistence_enabled():
+        store = _get_postgres_document_store()
+        latest_text = store.read_text(storage_key(LATEST_PLAN_JSON_KEY))
+        if latest_text:
+            return json.loads(latest_text)
+    if object_store_enabled():
+        latest_text = _get_object_store().read_text(storage_key(LATEST_PLAN_JSON_KEY))
+        if latest_text:
+            return json.loads(latest_text)
+    return _load_latest_plan_local()
+
+
+def _load_latest_plan_local() -> dict[str, Any] | None:
     latest_json_path = get_plans_dir() / "latest.plan.json"
     if not latest_json_path.exists():
         return None
@@ -189,15 +499,28 @@ def save_bundle(bundle: dict[str, Any] | ScanBundle) -> dict[str, Any]:
         key=lambda item: (item.get("target_id", ""), item.get("message", "")),
     )
     normalized["reconciliation"] = _normalize_reconciliation(normalized.get("reconciliation", {}))
-    bundles_dir = get_bundles_dir()
-    bundles_dir.mkdir(parents=True, exist_ok=True)
-    path = bundles_dir / f"{normalized['bundle_id']}.yaml"
-    with path.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(normalized, file, sort_keys=False, allow_unicode=False, width=120)
+    if local_persistence_enabled():
+        _save_bundle_local(normalized)
+    if postgres_persistence_enabled():
+        _save_bundle_postgres(normalized)
+    if object_store_enabled():
+        _save_bundle_object_store(normalized)
     return normalized
 
 
 def load_bundle(bundle_id: str) -> dict[str, Any] | None:
+    if postgres_persistence_enabled():
+        bundle = _load_bundle_postgres(bundle_id)
+        if bundle is not None:
+            return bundle
+    if object_store_enabled():
+        bundle = _load_bundle_object_store(bundle_id)
+        if bundle is not None:
+            return bundle
+    return _load_bundle_local(bundle_id)
+
+
+def _load_bundle_local(bundle_id: str) -> dict[str, Any] | None:
     path = get_bundles_dir() / f"{bundle_id}.yaml"
     if not path.exists():
         return None
@@ -207,6 +530,18 @@ def load_bundle(bundle_id: str) -> dict[str, Any] | None:
 
 
 def list_bundles() -> list[dict[str, Any]]:
+    if postgres_persistence_enabled():
+        items = _list_bundles_postgres()
+        if items:
+            return items
+    if object_store_enabled():
+        items = _list_bundles_object_store()
+        if items:
+            return items
+    return _list_bundles_local()
+
+
+def _list_bundles_local() -> list[dict[str, Any]]:
     bundles_dir = get_bundles_dir()
     if not bundles_dir.exists():
         return []
@@ -214,65 +549,210 @@ def list_bundles() -> list[dict[str, Any]]:
     for path in sorted(bundles_dir.glob("*.yaml")):
         with path.open(encoding="utf-8") as file:
             payload = yaml.safe_load(file) or {}
-        bundle = ScanBundle.model_validate(payload).model_dump(mode="json")
-        review = bundle.get("review", {})
-        items.append(
-            {
-                "bundle_id": bundle["bundle_id"],
-                "role": bundle.get("scan", {}).get("role", "scout"),
-                "scope": bundle.get("scan", {}).get("scope", "full"),
-                "base_structure_version": bundle.get("base_structure_version", 1),
-                "created_at": bundle.get("scan", {}).get("created_at", ""),
-                "patch_count": len(bundle.get("patches", [])),
-                "pending_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending"),
-                "accepted_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "accepted"),
-                "rejected_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "rejected"),
-                "deferred_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "deferred"),
-                "contradiction_count": len(bundle.get("contradictions", [])),
-                "review_required_count": sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)),
-                "high_severity_contradiction_count": bundle.get("reconciliation", {}).get("contradiction_summary", {}).get("severity_counts", {}).get("high", 0),
-                "contradiction_cluster_count": len(bundle.get("reconciliation", {}).get("contradiction_clusters", [])),
-                "open_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("open_count", 0),
-                "resolved_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolved_count", 0),
-                "mixed_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolution_state_counts", {}).get("mixed", 0),
-                "field_matrix_review_required_count": bundle.get("reconciliation", {}).get("field_matrix_summary", {}).get("review_required_count", 0),
-                "bundle_owner": review.get("bundle_owner", ""),
-                "assigned_reviewer": review.get("assigned_reviewer", ""),
-                "triage_state": review.get("triage_state", "new"),
-                "triage_note": review.get("triage_note", ""),
-                "last_reviewed_at": review.get("last_reviewed_at", ""),
-                "last_reviewed_by": review.get("last_reviewed_by", ""),
-                "merged_at": review.get("merged_at", ""),
-                "merged_by": review.get("merged_by", ""),
-                "merge_status": review.get("merge_status", ""),
-                "rebase_required": bool(review.get("rebase_required", False)),
-                "rebased_from_bundle_id": review.get("rebased_from_bundle_id", ""),
-                "superseded_by_bundle_id": review.get("superseded_by_bundle_id", ""),
-                "merge_plan_status": review.get("merge_plan", {}).get("status", ""),
-                "merge_plan_noop_count": review.get("merge_plan", {}).get("noop_count", 0),
-                "merge_plan_blocked_step_count": review.get("merge_plan", {}).get("blocked_step_count", 0),
-                "ready_to_merge": bool(review.get("merge_patch_ids"))
-                and sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending") == 0
-                and sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)) == 0
-                and not bool(review.get("rebase_required", False))
-                and not bool(review.get("superseded_by_bundle_id", ""))
-                and review.get("merge_plan", {}).get("status", "") in {"ready", "empty"},
-                "readiness_status": bundle.get("readiness", {}).get("status", "Not Ready"),
-                "planned_missing_count": bundle.get("reconciliation", {}).get("summary", {}).get("planned_missing", 0),
-                "observed_untracked_count": bundle.get("reconciliation", {}).get("summary", {}).get("observed_untracked", 0),
-                "implemented_differently_count": bundle.get("reconciliation", {}).get("summary", {}).get("implemented_differently", 0),
-                "uncertain_matches_count": bundle.get("reconciliation", {}).get("summary", {}).get("uncertain_matches", 0),
-                "binding_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("binding_mismatches", 0),
-                "column_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("column_mismatches", 0),
-                "downstream_breakage_count": bundle.get("reconciliation", {}).get("downstream_breakage", {}).get("count", 0),
-            }
-        )
+        items.append(_summarize_bundle_listing(payload))
     return items
 
 
 def export_canonical_yaml_text() -> str:
     graph = load_graph()
+    return _canonical_yaml_text(graph)
+
+
+def _local_graph_exists() -> bool:
+    return get_spec_path().exists() or get_legacy_spec_path().exists()
+
+
+def _canonical_yaml_text(graph: dict[str, Any]) -> str:
     return yaml.safe_dump(canonical_yaml_payload(graph), sort_keys=False, allow_unicode=False, width=120)
+
+
+def _write_graph_local(graph: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        file.write(_canonical_yaml_text(graph))
+    legacy_path = get_legacy_spec_path()
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    with legacy_path.open("w", encoding="utf-8") as file:
+        json.dump(graph, file, indent=2, ensure_ascii=True)
+        file.write("\n")
+
+
+def _persist_graph_postgres(graph: dict[str, Any]) -> None:
+    store = _get_postgres_document_store()
+    store.write_text(storage_key(GRAPH_JSON_KEY), json.dumps(graph, indent=2, ensure_ascii=True) + "\n", content_type="application/json")
+    store.write_text(storage_key(GRAPH_YAML_KEY), _canonical_yaml_text(graph), content_type="application/yaml")
+
+
+def _persist_graph_object_store(graph: dict[str, Any]) -> None:
+    store = _get_object_store()
+    store.write_text(storage_key(GRAPH_JSON_KEY), json.dumps(graph, indent=2, ensure_ascii=True) + "\n", content_type="application/json")
+    store.write_text(storage_key(GRAPH_YAML_KEY), _canonical_yaml_text(graph), content_type="application/yaml")
+
+
+def _save_bundle_local(bundle: dict[str, Any]) -> None:
+    bundles_dir = get_bundles_dir()
+    bundles_dir.mkdir(parents=True, exist_ok=True)
+    path = bundles_dir / f"{bundle['bundle_id']}.yaml"
+    with path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(bundle, file, sort_keys=False, allow_unicode=False, width=120)
+
+
+def _save_bundle_postgres(bundle: dict[str, Any]) -> None:
+    store = _get_postgres_document_store()
+    store.write_text(
+        storage_key(f"{BUNDLE_PREFIX}{bundle['bundle_id']}.yaml"),
+        yaml.safe_dump(bundle, sort_keys=False, allow_unicode=False, width=120),
+        content_type="application/yaml",
+    )
+
+
+def _load_bundle_postgres(bundle_id: str) -> dict[str, Any] | None:
+    store = _get_postgres_document_store()
+    payload_text = store.read_text(storage_key(f"{BUNDLE_PREFIX}{bundle_id}.yaml"))
+    if not payload_text:
+        return None
+    payload = yaml.safe_load(payload_text) or {}
+    return ScanBundle.model_validate(payload).model_dump(mode="json")
+
+
+def _list_bundles_postgres() -> list[dict[str, Any]]:
+    store = _get_postgres_document_store()
+    items: list[dict[str, Any]] = []
+    for _, payload_text in store.list_documents(storage_key(BUNDLE_PREFIX)):
+        payload = yaml.safe_load(payload_text) or {}
+        items.append(_summarize_bundle_listing(payload))
+    return items
+
+
+def _save_bundle_object_store(bundle: dict[str, Any]) -> None:
+    store = _get_object_store()
+    store.write_text(
+        storage_key(f"{BUNDLE_PREFIX}{bundle['bundle_id']}.yaml"),
+        yaml.safe_dump(bundle, sort_keys=False, allow_unicode=False, width=120),
+        content_type="application/yaml",
+    )
+
+
+def _load_bundle_object_store(bundle_id: str) -> dict[str, Any] | None:
+    store = _get_object_store()
+    payload_text = store.read_text(storage_key(f"{BUNDLE_PREFIX}{bundle_id}.yaml"))
+    if not payload_text:
+        return None
+    payload = yaml.safe_load(payload_text) or {}
+    return ScanBundle.model_validate(payload).model_dump(mode="json")
+
+
+def _list_bundles_object_store() -> list[dict[str, Any]]:
+    store = _get_object_store()
+    items: list[dict[str, Any]] = []
+    for _, payload_text in store.list_documents(storage_key(BUNDLE_PREFIX)):
+        payload = yaml.safe_load(payload_text) or {}
+        items.append(_summarize_bundle_listing(payload))
+    return items
+
+
+def _summarize_bundle_listing(payload: dict[str, Any]) -> dict[str, Any]:
+    bundle = ScanBundle.model_validate(payload).model_dump(mode="json")
+    review = bundle.get("review", {})
+    return {
+        "bundle_id": bundle["bundle_id"],
+        "role": bundle.get("scan", {}).get("role", "scout"),
+        "scope": bundle.get("scan", {}).get("scope", "full"),
+        "base_structure_version": bundle.get("base_structure_version", 1),
+        "created_at": bundle.get("scan", {}).get("created_at", ""),
+        "patch_count": len(bundle.get("patches", [])),
+        "pending_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending"),
+        "accepted_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "accepted"),
+        "rejected_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "rejected"),
+        "deferred_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "deferred"),
+        "contradiction_count": len(bundle.get("contradictions", [])),
+        "review_required_count": sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)),
+        "high_severity_contradiction_count": bundle.get("reconciliation", {}).get("contradiction_summary", {}).get("severity_counts", {}).get("high", 0),
+        "contradiction_cluster_count": len(bundle.get("reconciliation", {}).get("contradiction_clusters", [])),
+        "open_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("open_count", 0),
+        "resolved_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolved_count", 0),
+        "mixed_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolution_state_counts", {}).get("mixed", 0),
+        "field_matrix_review_required_count": bundle.get("reconciliation", {}).get("field_matrix_summary", {}).get("review_required_count", 0),
+        "bundle_owner": review.get("bundle_owner", ""),
+        "assigned_reviewer": review.get("assigned_reviewer", ""),
+        "triage_state": review.get("triage_state", "new"),
+        "triage_note": review.get("triage_note", ""),
+        "last_reviewed_at": review.get("last_reviewed_at", ""),
+        "last_reviewed_by": review.get("last_reviewed_by", ""),
+        "merged_at": review.get("merged_at", ""),
+        "merged_by": review.get("merged_by", ""),
+        "merge_status": review.get("merge_status", ""),
+        "rebase_required": bool(review.get("rebase_required", False)),
+        "rebased_from_bundle_id": review.get("rebased_from_bundle_id", ""),
+        "superseded_by_bundle_id": review.get("superseded_by_bundle_id", ""),
+        "merge_plan_status": review.get("merge_plan", {}).get("status", ""),
+        "merge_plan_noop_count": review.get("merge_plan", {}).get("noop_count", 0),
+        "merge_plan_blocked_step_count": review.get("merge_plan", {}).get("blocked_step_count", 0),
+        "ready_to_merge": bool(review.get("merge_patch_ids"))
+        and sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending") == 0
+        and sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)) == 0
+        and not bool(review.get("rebase_required", False))
+        and not bool(review.get("superseded_by_bundle_id", ""))
+        and review.get("merge_plan", {}).get("status", "") in {"ready", "empty"},
+        "readiness_status": bundle.get("readiness", {}).get("status", "Not Ready"),
+        "planned_missing_count": bundle.get("reconciliation", {}).get("summary", {}).get("planned_missing", 0),
+        "observed_untracked_count": bundle.get("reconciliation", {}).get("summary", {}).get("observed_untracked", 0),
+        "implemented_differently_count": bundle.get("reconciliation", {}).get("summary", {}).get("implemented_differently", 0),
+        "uncertain_matches_count": bundle.get("reconciliation", {}).get("summary", {}).get("uncertain_matches", 0),
+        "binding_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("binding_mismatches", 0),
+        "column_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("column_mismatches", 0),
+        "downstream_breakage_count": bundle.get("reconciliation", {}).get("downstream_breakage", {}).get("count", 0),
+    }
+
+
+def load_onboarding_presets_payload() -> list[dict[str, Any]]:
+    if postgres_persistence_enabled():
+        store = _get_postgres_document_store()
+        payload_text = store.read_text(storage_key(ONBOARDING_PRESETS_KEY))
+        if payload_text:
+            payload = json.loads(payload_text)
+            return payload if isinstance(payload, list) else []
+    if object_store_enabled():
+        payload_text = _get_object_store().read_text(storage_key(ONBOARDING_PRESETS_KEY))
+        if payload_text:
+            payload = json.loads(payload_text)
+            return payload if isinstance(payload, list) else []
+    return _load_onboarding_presets_local()
+
+
+def save_onboarding_presets_payload(presets: list[dict[str, Any]]) -> None:
+    if local_persistence_enabled():
+        _save_onboarding_presets_local(presets)
+    if postgres_persistence_enabled():
+        store = _get_postgres_document_store()
+        store.write_text(
+            storage_key(ONBOARDING_PRESETS_KEY),
+            json.dumps(presets, indent=2, ensure_ascii=True) + "\n",
+            content_type="application/json",
+        )
+    if object_store_enabled():
+        _get_object_store().write_text(
+            storage_key(ONBOARDING_PRESETS_KEY),
+            json.dumps(presets, indent=2, ensure_ascii=True) + "\n",
+            content_type="application/json",
+        )
+
+
+def _load_onboarding_presets_local() -> list[dict[str, Any]]:
+    path = get_onboarding_presets_path()
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8") as file:
+        data = json.load(file)
+    return data if isinstance(data, list) else []
+
+
+def _save_onboarding_presets_local(presets: list[dict[str, Any]]) -> None:
+    path = get_onboarding_presets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(presets, file, indent=2, ensure_ascii=True)
+        file.write("\n")
 
 
 def _stable_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

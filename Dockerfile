@@ -9,7 +9,7 @@ COPY specs ./specs
 COPY runtime ./runtime
 COPY data ./data
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[persistence]"
 
 ENV PYTHONPATH=/app/src
 ENV WORKBENCH_HOST=0.0.0.0

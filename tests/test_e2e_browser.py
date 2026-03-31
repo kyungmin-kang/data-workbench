@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -23,15 +24,73 @@ def find_chromium_executable() -> str | None:
     if env_path and Path(env_path).exists():
         return env_path
 
+    browser_roots = [
+        ROOT_DIR / ".playwright-browsers",
+        Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")).expanduser() if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else None,
+        Path.home() / "Library" / "Caches" / "ms-playwright",
+        Path.home() / ".cache" / "ms-playwright",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright" if os.environ.get("LOCALAPPDATA") else None,
+    ]
+    patterns = (
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-win/chrome.exe",
+        "chromium-*/chrome-win64/chrome.exe",
+    )
     candidates = [
-        *ROOT_DIR.glob(".playwright-browsers/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"),
-        *Path.home().glob("Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"),
         Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
         Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/opt/google/chrome/chrome"),
+        Path("/snap/bin/chromium"),
+        Path("/usr/bin/microsoft-edge"),
+        Path("/usr/bin/msedge"),
+        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
     ]
+    for browser_root in browser_roots:
+        if not browser_root:
+            continue
+        for pattern in patterns:
+            candidates.extend(browser_root.glob(pattern))
+    for executable_name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "msedge"):
+        resolved = shutil.which(executable_name)
+        if resolved:
+            candidates.append(Path(resolved))
     for candidate in candidates:
         if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def build_browser_launch_options() -> dict[str, str | bool]:
+    executable_path = find_chromium_executable()
+    if executable_path:
+        return {"headless": True, "executable_path": executable_path}
+    channel = os.environ.get("PLAYWRIGHT_CHROMIUM_CHANNEL")
+    if channel:
+        return {"headless": True, "channel": channel}
+    return {"headless": True}
+
+
+def find_python_executable() -> str | None:
+    env_path = os.environ.get("WORKBENCH_E2E_PYTHON")
+    candidates = [
+        Path(env_path).expanduser() if env_path else None,
+        ROOT_DIR / ".venv" / "bin" / "python",
+        ROOT_DIR / ".venv" / "Scripts" / "python.exe",
+        Path(sys.executable).resolve() if sys.executable else None,
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
             return str(candidate)
     return None
 
@@ -45,8 +104,19 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-@unittest.skipUnless(sync_playwright and find_chromium_executable(), "Playwright or Chromium binary not available.")
+@unittest.skipUnless(sync_playwright, "Playwright is not installed.")
 class BrowserE2ETests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.browser_launch_options = build_browser_launch_options()
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(**cls.browser_launch_options)
+                browser.close()
+        except Exception as error:  # pragma: no cover - environment-specific
+            raise unittest.SkipTest(f"Chromium could not be launched for E2E tests: {error}") from error
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -58,20 +128,23 @@ class BrowserE2ETests(unittest.TestCase):
         (self.root / "runtime" / "cache").mkdir(parents=True, exist_ok=True)
 
         self.port = find_free_port()
+        python_executable = find_python_executable()
+        if python_executable is None:
+            self.skipTest("No Python interpreter was found for launching the app server.")
         env = os.environ.copy()
         env["PYTHONPATH"] = "src"
         env["WORKBENCH_ROOT_DIR"] = str(self.root)
         env["WORKBENCH_HOST"] = "127.0.0.1"
         env["WORKBENCH_PORT"] = str(self.port)
         self.server = subprocess.Popen(
-            [str(ROOT_DIR / ".venv" / "bin" / "python"), "-m", "workbench.app"],
+            [python_executable, "-m", "workbench.app"],
             cwd=ROOT_DIR,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        wait_for_server(f"http://127.0.0.1:{self.port}/healthz")
+        wait_for_server(f"http://127.0.0.1:{self.port}/healthz", process=self.server)
 
     def tearDown(self) -> None:
         if getattr(self, "server", None) and self.server.poll() is None:
@@ -83,11 +156,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_project_survey_loads_into_import_form_and_imports_asset(self) -> None:
-        executable_path = find_chromium_executable()
-        assert executable_path is not None
-
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            browser = playwright.chromium.launch(**self.browser_launch_options)
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
 
@@ -111,11 +181,8 @@ class BrowserE2ETests(unittest.TestCase):
             browser.close()
 
     def test_graph_edit_controls_only_show_in_edit_mode_and_add_cancel_remove_work(self) -> None:
-        executable_path = find_chromium_executable()
-        assert executable_path is not None
-
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            browser = playwright.chromium.launch(**self.browser_launch_options)
             page = browser.new_page(viewport={"width": 1680, "height": 1200})
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
 
@@ -159,9 +226,6 @@ class BrowserE2ETests(unittest.TestCase):
             browser.close()
 
     def test_structure_review_surface_shows_contradictions_and_review_actions(self) -> None:
-        executable_path = find_chromium_executable()
-        assert executable_path is not None
-
         backend_dir = self.root / "backend"
         backend_dir.mkdir(parents=True, exist_ok=True)
         (backend_dir / "pricing.py").write_text(
@@ -195,7 +259,7 @@ def pricing_snapshot(session):
         )
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            browser = playwright.chromium.launch(**self.browser_launch_options)
             page = browser.new_page(viewport={"width": 1680, "height": 1200})
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
 
@@ -217,9 +281,6 @@ def pricing_snapshot(session):
             browser.close()
 
     def test_structure_review_workflow_assignment_and_keyboard_review(self) -> None:
-        executable_path = find_chromium_executable()
-        assert executable_path is not None
-
         docs_dir = self.root / "docs"
         docs_dir.mkdir(parents=True, exist_ok=True)
         (docs_dir / "keyboard_review.md").write_text(
@@ -228,7 +289,7 @@ def pricing_snapshot(session):
         )
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            browser = playwright.chromium.launch(**self.browser_launch_options)
             page = browser.new_page(viewport={"width": 1680, "height": 1200})
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
 
@@ -252,9 +313,14 @@ def pricing_snapshot(session):
             browser.close()
 
 
-def wait_for_server(url: str, timeout_seconds: float = 10.0) -> None:
+def wait_for_server(url: str, timeout_seconds: float = 10.0, process: subprocess.Popen[str] | None = None) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
+        if process and process.poll() is not None:
+            stdout = process.stdout.read().strip() if process.stdout else ""
+            stderr = process.stderr.read().strip() if process.stderr else ""
+            details = "\n".join(part for part in (stdout, stderr) if part)
+            raise RuntimeError(f"Server exited before becoming ready: {details or 'no output captured'}")
         try:
             with urllib.request.urlopen(url) as response:  # noqa: S310
                 if response.status == 200:
