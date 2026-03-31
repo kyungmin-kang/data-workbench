@@ -24,9 +24,13 @@ from .structure_memory import (
     build_structure_summary,
     import_yaml_spec,
     merge_bundle,
+    preview_rebase_bundle,
+    rebase_bundle,
+    review_bundle_contradiction,
     review_bundle_patch,
     review_bundle_patches,
     scan_structure,
+    update_bundle_workflow,
 )
 from .types import GraphValidationError, validate_graph
 from .validation import build_validation_report
@@ -118,15 +122,39 @@ class StructureScanRequest(BaseModel):
 class StructurePatchReviewRequest(BaseModel):
     patch_id: str
     decision: str
+    reviewed_by: str = "user"
+    note: str = ""
 
 
 class StructureBatchReviewRequest(BaseModel):
     patch_ids: list[str] = []
     decision: str
+    reviewed_by: str = "user"
+    note: str = ""
+
+
+class StructureContradictionReviewRequest(BaseModel):
+    contradiction_id: str
+    decision: str
+    reviewed_by: str = "user"
+    note: str = ""
+
+
+class StructureBundleWorkflowRequest(BaseModel):
+    bundle_owner: str | None = None
+    assigned_reviewer: str | None = None
+    triage_state: str | None = None
+    triage_note: str | None = None
+    updated_by: str = "user"
+    note: str = ""
 
 
 class StructureBundleMergeRequest(BaseModel):
     merged_by: str = "user"
+
+
+class StructureBundleRebaseRequest(BaseModel):
+    preserve_reviews: bool = True
 
 
 app = FastAPI(title="Data Workbench", version="0.2.0")
@@ -201,7 +229,13 @@ def structure_scan_endpoint(payload: StructureScanRequest) -> dict[str, Any]:
 @app.post("/api/structure/bundles/{bundle_id}/review")
 def review_structure_bundle_endpoint(bundle_id: str, payload: StructurePatchReviewRequest) -> dict[str, Any]:
     try:
-        return review_bundle_patch(bundle_id, payload.patch_id, payload.decision)
+        return review_bundle_patch(
+            bundle_id,
+            payload.patch_id,
+            payload.decision,
+            reviewed_by=payload.reviewed_by,
+            note=payload.note,
+        )
     except (GraphValidationError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -209,7 +243,57 @@ def review_structure_bundle_endpoint(bundle_id: str, payload: StructurePatchRevi
 @app.post("/api/structure/bundles/{bundle_id}/review-batch")
 def review_structure_bundle_batch_endpoint(bundle_id: str, payload: StructureBatchReviewRequest) -> dict[str, Any]:
     try:
-        return review_bundle_patches(bundle_id, payload.patch_ids, payload.decision)
+        return review_bundle_patches(
+            bundle_id,
+            payload.patch_ids,
+            payload.decision,
+            reviewed_by=payload.reviewed_by,
+            note=payload.note,
+        )
+    except (GraphValidationError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/structure/bundles/{bundle_id}/review-contradiction")
+def review_structure_bundle_contradiction_endpoint(
+    bundle_id: str,
+    payload: StructureContradictionReviewRequest,
+) -> dict[str, Any]:
+    try:
+        return review_bundle_contradiction(
+            bundle_id,
+            payload.contradiction_id,
+            payload.decision,
+            reviewed_by=payload.reviewed_by,
+            note=payload.note,
+        )
+    except (GraphValidationError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/structure/bundles/{bundle_id}/workflow")
+def update_structure_bundle_workflow_endpoint(
+    bundle_id: str,
+    payload: StructureBundleWorkflowRequest,
+) -> dict[str, Any]:
+    try:
+        return update_bundle_workflow(
+            bundle_id,
+            bundle_owner=payload.bundle_owner,
+            assigned_reviewer=payload.assigned_reviewer,
+            triage_state=payload.triage_state,
+            triage_note=payload.triage_note,
+            updated_by=payload.updated_by,
+            note=payload.note,
+        )
+    except (GraphValidationError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/structure/bundles/{bundle_id}/rebase-preview")
+def preview_structure_bundle_rebase_endpoint(bundle_id: str, preserve_reviews: bool = True) -> dict[str, Any]:
+    try:
+        return preview_rebase_bundle(bundle_id, preserve_reviews=preserve_reviews)
     except (GraphValidationError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -218,6 +302,14 @@ def review_structure_bundle_batch_endpoint(bundle_id: str, payload: StructureBat
 def merge_structure_bundle_endpoint(bundle_id: str, payload: StructureBundleMergeRequest) -> dict[str, Any]:
     try:
         return merge_bundle(bundle_id, merged_by=payload.merged_by)
+    except (GraphValidationError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/structure/bundles/{bundle_id}/rebase")
+def rebase_structure_bundle_endpoint(bundle_id: str, payload: StructureBundleRebaseRequest) -> dict[str, Any]:
+    try:
+        return rebase_bundle(bundle_id, preserve_reviews=payload.preserve_reviews)
     except (GraphValidationError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

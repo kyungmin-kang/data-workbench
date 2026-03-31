@@ -235,6 +235,494 @@ paths:
         }
         self.assertEqual(reviewed_states, {patch_id: "accepted" for patch_id in patch_ids})
 
+    def test_structure_batch_review_persists_reviewer_note_and_ready_state(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "batch_review_notes.md").write_text("GET /api/demo/review-notes\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/batch_review_notes.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        patch_ids = [patch["id"] for patch in bundle["patches"]]
+        self.assertTrue(patch_ids)
+
+        review_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/review-batch",
+            json={
+                "patch_ids": patch_ids,
+                "decision": "accepted",
+                "reviewed_by": "review-manager",
+                "note": "Reviewed as a clean bundle-level addition.",
+            },
+        )
+        self.assertEqual(review_response.status_code, 200)
+        reviewed_bundle = review_response.json()["bundle"]
+        self.assertEqual(reviewed_bundle["review"]["last_reviewed_by"], "review-manager")
+        self.assertEqual(reviewed_bundle["review"]["last_review_note"], "Reviewed as a clean bundle-level addition.")
+        for patch in reviewed_bundle["patches"]:
+            self.assertEqual(patch["review_state"], "accepted")
+            self.assertEqual(patch["reviewed_by"], "review-manager")
+            self.assertEqual(patch["review_note"], "Reviewed as a clean bundle-level addition.")
+            self.assertTrue(patch["review_history"])
+
+        list_response = self.client.get("/api/structure/bundles")
+        self.assertEqual(list_response.status_code, 200)
+        bundle_summary = next(
+            item
+            for item in list_response.json()["bundles"]
+            if item["bundle_id"] == bundle["bundle_id"]
+        )
+        self.assertEqual(bundle_summary["last_reviewed_by"], "review-manager")
+        self.assertTrue(bundle_summary["last_reviewed_at"])
+        self.assertEqual(bundle_summary["accepted_count"], bundle_summary["patch_count"])
+        self.assertEqual(bundle_summary["pending_count"], 0)
+        self.assertEqual(
+            bundle_summary["ready_to_merge"],
+            bundle_summary["review_required_count"] == 0 and not bundle_summary["rebase_required"],
+        )
+
+    def test_structure_workflow_endpoint_persists_assignment_triage_and_list_metadata(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "workflow_bundle.md").write_text("GET /api/demo/workflow\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/workflow_bundle.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+
+        workflow_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/workflow",
+            json={
+                "bundle_owner": "platform-data",
+                "assigned_reviewer": "review-manager",
+                "triage_state": "blocked",
+                "triage_note": "Waiting on API owners to confirm the route migration path.",
+                "updated_by": "review-manager",
+                "note": "Blocked until upstream contract owners sign off.",
+            },
+        )
+        self.assertEqual(workflow_response.status_code, 200)
+        updated_bundle = workflow_response.json()["bundle"]
+        self.assertEqual(updated_bundle["review"]["bundle_owner"], "platform-data")
+        self.assertEqual(updated_bundle["review"]["assigned_reviewer"], "review-manager")
+        self.assertEqual(updated_bundle["review"]["triage_state"], "blocked")
+        self.assertEqual(updated_bundle["review"]["triage_note"], "Waiting on API owners to confirm the route migration path.")
+        self.assertTrue(updated_bundle["review"]["workflow_history"])
+        self.assertEqual(updated_bundle["review"]["workflow_history"][-1]["updated_by"], "review-manager")
+        self.assertEqual(updated_bundle["review"]["workflow_history"][-1]["changes"]["assigned_reviewer"], "review-manager")
+
+        list_response = self.client.get("/api/structure/bundles")
+        self.assertEqual(list_response.status_code, 200)
+        bundle_summary = next(
+            item
+            for item in list_response.json()["bundles"]
+            if item["bundle_id"] == bundle["bundle_id"]
+        )
+        self.assertEqual(bundle_summary["bundle_owner"], "platform-data")
+        self.assertEqual(bundle_summary["assigned_reviewer"], "review-manager")
+        self.assertEqual(bundle_summary["triage_state"], "blocked")
+        self.assertEqual(bundle_summary["triage_note"], "Waiting on API owners to confirm the route migration path.")
+
+    def test_structure_bundle_listing_surfaces_review_counts_and_merge_metadata(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "bundle_listing.md").write_text(
+            "GET /api/demo/listing/a\nGET /api/demo/listing/b\nGET /api/demo/listing/c\n",
+            encoding="utf-8",
+        )
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/bundle_listing.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        self.assertGreaterEqual(len(bundle["patches"]), 3)
+
+        patch_ids = [patch["id"] for patch in bundle["patches"][:3]]
+        self.assertEqual(
+            self.client.post(
+                f"/api/structure/bundles/{bundle['bundle_id']}/review",
+                json={"patch_id": patch_ids[0], "decision": "accepted"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/structure/bundles/{bundle['bundle_id']}/review",
+                json={"patch_id": patch_ids[1], "decision": "deferred"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/structure/bundles/{bundle['bundle_id']}/review",
+                json={"patch_id": patch_ids[2], "decision": "rejected"},
+            ).status_code,
+            200,
+        )
+
+        merge_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/merge",
+            json={"merged_by": "test-suite"},
+        )
+        self.assertEqual(merge_response.status_code, 200)
+
+        list_response = self.client.get("/api/structure/bundles")
+        self.assertEqual(list_response.status_code, 200)
+        bundle_summary = next(
+            item
+            for item in list_response.json()["bundles"]
+            if item["bundle_id"] == bundle["bundle_id"]
+        )
+        self.assertEqual(bundle_summary["accepted_count"], 1)
+        self.assertEqual(bundle_summary["deferred_count"], 1)
+        self.assertEqual(bundle_summary["rejected_count"], 1)
+        self.assertEqual(
+            bundle_summary["accepted_count"]
+            + bundle_summary["deferred_count"]
+            + bundle_summary["rejected_count"]
+            + bundle_summary["pending_count"],
+            bundle_summary["patch_count"],
+        )
+        self.assertTrue(bundle_summary["merged_at"])
+        self.assertEqual(bundle_summary["merged_by"], "test-suite")
+
+    def test_structure_merge_endpoint_rejects_stale_bundle(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "stale_bundle.md").write_text("GET /api/demo/stale-check\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/stale_bundle.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        patch_id = bundle["patches"][0]["id"]
+
+        review_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/review",
+            json={"patch_id": patch_id, "decision": "accepted"},
+        )
+        self.assertEqual(review_response.status_code, 200)
+
+        export_response = self.client.get("/api/structure/export")
+        self.assertEqual(export_response.status_code, 200)
+        import_response = self.client.post(
+            "/api/structure/import",
+            json={"yaml_text": export_response.text, "updated_by": "stale-check"},
+        )
+        self.assertEqual(import_response.status_code, 200)
+
+        merge_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/merge",
+            json={"merged_by": "test-suite"},
+        )
+        self.assertEqual(merge_response.status_code, 400)
+        self.assertIn("stale", merge_response.json()["detail"])
+
+    def test_structure_scan_surfaces_binding_contradictions_with_downstream_impacts(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    median_home_price = Column(Numeric)
+    pricing_score = Column(Numeric)
+    shadow_inventory_index = Column(Numeric)
+
+@router.get("/api/markets/snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return {
+        "median_home_price": signal.median_home_price,
+        "pricing_score": signal.pricing_score,
+        "shadow_inventory_index": signal.shadow_inventory_index,
+    }
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+
+        contradiction = next(
+            item
+            for item in bundle["contradictions"]
+            if item["field_id"] == "field.api_market_snapshot.pricing_score"
+        )
+        self.assertTrue(contradiction["review_required"])
+        self.assertEqual(contradiction["existing_belief"]["primary_binding"], "field.model_pricing_v1.pricing_score")
+        self.assertEqual(contradiction["new_evidence"]["primary_binding"], "field.analytics_market_signals.pricing_score")
+        self.assertIn("PricingScoreCard will not render", contradiction["downstream_impacts"][0])
+
+        change_patch = next(
+            patch
+            for patch in bundle["patches"]
+            if patch["type"] == "change_binding"
+            and patch["field_id"] == "field.api_market_snapshot.pricing_score"
+        )
+        self.assertEqual(change_patch["review_state"], "pending")
+        self.assertEqual(change_patch["payload"]["previous_binding"], "field.model_pricing_v1.pricing_score")
+        self.assertEqual(change_patch["payload"]["new_binding"], "field.analytics_market_signals.pricing_score")
+        self.assertEqual(change_patch["evidence"], ["code_reference"])
+
+    def test_structure_contradiction_review_updates_related_patches_and_history(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    median_home_price = Column(Numeric)
+    pricing_score = Column(Numeric)
+    shadow_inventory_index = Column(Numeric)
+
+@router.get("/api/markets/snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return {
+        "median_home_price": signal.median_home_price,
+        "pricing_score": signal.pricing_score,
+        "shadow_inventory_index": signal.shadow_inventory_index,
+    }
+""".strip(),
+            encoding="utf-8",
+        )
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        contradiction = next(
+            item
+            for item in bundle["contradictions"]
+            if item["field_id"] == "field.api_market_snapshot.pricing_score"
+        )
+
+        review_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/review-contradiction",
+            json={
+                "contradiction_id": contradiction["id"],
+                "decision": "rejected",
+                "reviewed_by": "review-manager",
+                "note": "Keep canonical binding until model migration is approved.",
+            },
+        )
+        self.assertEqual(review_response.status_code, 200)
+        reviewed_bundle = review_response.json()["bundle"]
+        reviewed_contradiction = next(
+            item for item in reviewed_bundle["contradictions"] if item["id"] == contradiction["id"]
+        )
+        self.assertFalse(reviewed_contradiction["review_required"])
+        self.assertEqual(reviewed_contradiction["review_state"], "rejected")
+        self.assertEqual(reviewed_contradiction["reviewed_by"], "review-manager")
+        self.assertEqual(reviewed_contradiction["review_note"], "Keep canonical binding until model migration is approved.")
+        self.assertTrue(reviewed_contradiction["review_history"])
+
+        related_patch = next(
+            patch
+            for patch in reviewed_bundle["patches"]
+            if patch["type"] == "change_binding"
+            and patch["field_id"] == "field.api_market_snapshot.pricing_score"
+        )
+        self.assertEqual(related_patch["review_state"], "rejected")
+        self.assertEqual(related_patch["reviewed_by"], "review-manager")
+        self.assertEqual(related_patch["review_note"], "Keep canonical binding until model migration is approved.")
+        self.assertTrue(related_patch["review_history"])
+
+    def test_structure_rebase_preview_reports_preserved_and_dropped_reviews(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        review_doc = docs_dir / "rebase_preview.md"
+        review_doc.write_text("GET /api/demo/rebase-old\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/rebase_preview.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        patch_id = bundle["patches"][0]["id"]
+
+        review_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/review",
+            json={
+                "patch_id": patch_id,
+                "decision": "accepted",
+                "reviewed_by": "review-manager",
+                "note": "Original route proposal approved.",
+            },
+        )
+        self.assertEqual(review_response.status_code, 200)
+
+        export_response = self.client.get("/api/structure/export")
+        self.assertEqual(export_response.status_code, 200)
+        import_response = self.client.post(
+            "/api/structure/import",
+            json={"yaml_text": export_response.text, "updated_by": "rebase-preview"},
+        )
+        self.assertEqual(import_response.status_code, 200)
+
+        review_doc.write_text("GET /api/demo/rebase-new\n", encoding="utf-8")
+
+        preview_response = self.client.get(
+            f"/api/structure/bundles/{bundle['bundle_id']}/rebase-preview?preserve_reviews=true"
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        preview = preview_response.json()["preview"]
+        self.assertGreater(preview["current_version"], preview["base_version"])
+        self.assertEqual(preview["transferred_review_count"], 0)
+        self.assertGreaterEqual(preview["dropped_review_states"]["accepted"], 1)
+        self.assertTrue(preview["changed_targets"])
+        self.assertTrue(preview["dropped_review_units"])
+        self.assertEqual(preview["dropped_review_units"][0]["decision"], "accepted")
+
+    def test_structure_rebase_preserves_review_units_and_workflow_when_targets_still_match(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        review_doc = docs_dir / "rebase_preserve.md"
+        review_doc.write_text("GET /api/demo/rebase-preserve\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/rebase_preserve.md"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle = scan_response.json()["bundle"]
+        patch_id = bundle["patches"][0]["id"]
+
+        workflow_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/workflow",
+            json={
+                "bundle_owner": "platform-data",
+                "assigned_reviewer": "review-manager",
+                "triage_state": "in_review",
+                "triage_note": "Carry this route forward during the version bump.",
+                "updated_by": "review-manager",
+            },
+        )
+        self.assertEqual(workflow_response.status_code, 200)
+
+        review_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/review",
+            json={
+                "patch_id": patch_id,
+                "decision": "accepted",
+                "reviewed_by": "review-manager",
+                "note": "Route addition approved before the version bump.",
+            },
+        )
+        self.assertEqual(review_response.status_code, 200)
+
+        export_response = self.client.get("/api/structure/export")
+        self.assertEqual(export_response.status_code, 200)
+        import_response = self.client.post(
+            "/api/structure/import",
+            json={"yaml_text": export_response.text, "updated_by": "rebase-preserve"},
+        )
+        self.assertEqual(import_response.status_code, 200)
+
+        preview_response = self.client.get(
+            f"/api/structure/bundles/{bundle['bundle_id']}/rebase-preview?preserve_reviews=true"
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        preview = preview_response.json()["preview"]
+        self.assertGreaterEqual(preview["transferred_review_count"], 1)
+        self.assertTrue(preview["preserved_review_units"])
+        self.assertEqual(preview["preserved_review_units"][0]["decision"], "accepted")
+
+        rebase_response = self.client.post(
+            f"/api/structure/bundles/{bundle['bundle_id']}/rebase",
+            json={"preserve_reviews": True},
+        )
+        self.assertEqual(rebase_response.status_code, 200)
+        rebased_bundle = rebase_response.json()["bundle"]
+        self.assertEqual(rebased_bundle["review"]["bundle_owner"], "platform-data")
+        self.assertEqual(rebased_bundle["review"]["assigned_reviewer"], "review-manager")
+        self.assertEqual(rebased_bundle["review"]["triage_state"], "in_review")
+        self.assertEqual(rebased_bundle["review"]["triage_note"], "Carry this route forward during the version bump.")
+
     def test_structure_scan_reconciliation_flags_planned_missing_route(self) -> None:
         graph = self.client.get("/api/graph").json()["graph"]
         graph["nodes"].append(
@@ -834,6 +1322,57 @@ paths:
         self.assertTrue(payload["api_contract_hints"])
         self.assertTrue(payload["ui_contract_hints"])
 
+    def test_project_profile_endpoint_surfaces_planning_hints_from_latest_plan(self) -> None:
+        latest_plan_path = self.root / "runtime" / "plans" / "latest.plan.md"
+        latest_plan_path.write_text(
+            """
+# API: GET /api/profile-planned
+Fields:
+- pricing_score <- analytics.market_signals.pricing_score
+- market <- analytics.market_signals.market
+
+# Table: analytics.market_signals
+Columns:
+- pricing_score (float)
+- market (string)
+
+# Compute: Build analytics.market_features
+Inputs: analytics.market_signals
+Outputs: analytics.market_features
+Columns:
+- pricing_delta (float) <- analytics.market_signals.pricing_score
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        self.assertGreaterEqual(payload["summary"]["planning_api_hints"], 1)
+        self.assertGreaterEqual(payload["summary"]["planning_data_hints"], 1)
+        self.assertGreaterEqual(payload["summary"]["planning_compute_hints"], 1)
+
+        api_hint = next(hint for hint in payload["planning_api_hints"] if hint["route"] == "GET /api/profile-planned")
+        self.assertEqual(sorted(api_hint["response_fields"]), ["market", "pricing_score"])
+        self.assertEqual(sorted(api_hint["required_fields"]), ["market", "pricing_score"])
+        pricing_sources = next(item for item in api_hint["response_field_sources"] if item["name"] == "pricing_score")
+        self.assertEqual(pricing_sources["source_fields"][0]["relation"], "analytics.market_signals")
+        self.assertEqual(pricing_sources["source_fields"][0]["column"], "pricing_score")
+
+        data_hint = next(
+            hint for hint in payload["planning_data_hints"] if hint["relation"] == "analytics.market_signals"
+        )
+        self.assertEqual(sorted(field["name"] for field in data_hint["fields"]), ["market", "pricing_score"])
+
+        compute_hint = next(
+            hint for hint in payload["planning_compute_hints"] if hint["relation"] == "analytics.market_features"
+        )
+        self.assertEqual(compute_hint["inputs"], ["data:analytics_market_signals"])
+        self.assertEqual(compute_hint["outputs"], ["data:analytics_market_features"])
+        pricing_delta = next(field for field in compute_hint["fields"] if field["name"] == "pricing_delta")
+        self.assertEqual(pricing_delta["source_fields"][0]["relation"], "analytics.market_signals")
+        self.assertEqual(pricing_delta["source_fields"][0]["column"], "pricing_score")
+
     def test_project_profile_endpoint_accepts_custom_root_path(self) -> None:
         nested_root = self.root / "examples" / "nested"
         nested_root.mkdir(parents=True, exist_ok=True)
@@ -1223,6 +1762,64 @@ def pricing_snapshot(session):
             ],
         )
 
+    def test_project_profile_infers_api_response_field_sources_from_dataclass_asdict_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "serializers.py").write_text(
+            """
+from dataclasses import dataclass
+
+@dataclass
+class PricingSnapshot:
+    pricing_score: float
+    market: str
+
+def serialize_signal(signal):
+    return PricingSnapshot(pricing_score=signal.pricing_score, market=signal.market)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from dataclasses import asdict
+
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+from backend.serializers import serialize_signal
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/dataclass-pricing-snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return asdict(serialize_signal(signal))
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/dataclass-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
     def test_project_profile_infers_api_response_field_sources_from_list_serializer(self) -> None:
         backend_dir = self.root / "backend"
         backend_dir.mkdir(parents=True, exist_ok=True)
@@ -1421,6 +2018,1370 @@ def pricing_snapshot(session):
             ],
         )
 
+    def test_project_profile_infers_api_response_field_sources_across_imported_modules(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        serializer = SnapshotSerializer(signal)
+        return serializer.to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+from backend.services import SnapshotService
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/imported-service-pricing-snapshot")
+def pricing_snapshot(session):
+    service = SnapshotService(session, MarketSignal)
+    return service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/imported-service-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_module_alias_import(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+import backend.services as svc
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/module-alias-pricing-snapshot")
+def pricing_snapshot(session):
+    return svc.SnapshotService(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/module-alias-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_package_reexport(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.services import SnapshotService
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+from backend import SnapshotService
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/package-reexport-pricing-snapshot")
+def pricing_snapshot(session):
+    return SnapshotService(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/package-reexport-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_imported_factory_return_object(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "factories.py").write_text(
+            """
+from backend.services import SnapshotService
+
+def build_service(session, MarketSignal):
+    return SnapshotService(session, MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+import backend.factories as factory_mod
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/factory-object-pricing-snapshot")
+def pricing_snapshot(session):
+    return factory_mod.build_service(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/factory-object-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_async_depends_service(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+def fetch_signal(MarketSignal):
+    return session.query(MarketSignal).first()
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+
+def get_service():
+    return SnapshotService(MarketSignal)
+
+@router.get("/api/async-depends-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/async-depends-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_async_imported_wrapper_chain(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "factories.py").write_text(
+            """
+from backend.services import SnapshotService
+
+def build_service(MarketSignal):
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "wrappers.py").write_text(
+            """
+from backend.factories import build_service
+from backend.models import MarketSignal
+
+async def build_payload():
+    service = build_service(MarketSignal)
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+import backend.wrappers as wrapper_mod
+
+router = APIRouter()
+
+@router.get("/api/async-wrapper-pricing-snapshot")
+async def pricing_snapshot():
+    return await wrapper_mod.build_payload()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/async-wrapper-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_module_alias_depends_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+import backend.deps as deps_mod
+
+router = APIRouter()
+
+@router.get("/api/module-alias-depends-pricing-snapshot")
+async def pricing_snapshot(service = Depends(deps_mod.get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/module-alias-depends-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_package_reexport_depends_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.deps import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend import get_service
+
+router = APIRouter()
+
+@router.get("/api/package-reexport-depends-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/package-reexport-depends-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_nested_depends_chain(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "repository.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotRepository:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    def fetch_signal(self):
+        return fetch_signal(self.MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, repo):
+        self.repo = repo
+
+    async def build_snapshot(self):
+        signal = self.repo.fetch_signal()
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from fastapi import Depends
+
+from backend.models import MarketSignal
+from backend.repository import SnapshotRepository
+from backend.services import SnapshotService
+
+def get_repo():
+    return SnapshotRepository(MarketSignal)
+
+def get_service(repo = Depends(get_repo)):
+    return SnapshotService(repo)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend.deps import get_service
+
+router = APIRouter()
+
+@router.get("/api/nested-depends-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/nested-depends-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_payload_merge_wrapper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    base = {"pricing_score": signal.pricing_score}
+    payload = {**base}
+    payload.update({"market": signal.market})
+    return payload
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-merge-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/payload-merge-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_object_method_payload_passthrough(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotFormatter:
+    def finalize(self, payload, signal):
+        payload["market"] = signal.market
+        return payload
+
+class SnapshotService:
+    def __init__(self, formatter):
+        self.formatter = formatter
+
+    def build_snapshot(self, signal):
+        payload = {"pricing_score": signal.pricing_score}
+        return self.formatter.finalize(payload, signal)
+
+def build_service():
+    return SnapshotService(SnapshotFormatter())
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.models import MarketSignal
+from backend.services import build_service
+
+router = APIRouter()
+
+@router.get("/api/object-method-passthrough-pricing-snapshot")
+def pricing_snapshot():
+    signal = query(MarketSignal).first()
+    return build_service().build_snapshot(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(
+            hint
+            for hint in payload["api_contract_hints"]
+            if hint["route"] == "GET /api/object-method-passthrough-pricing-snapshot"
+        )
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_dict_union_expression(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    base = {"pricing_score": signal.pricing_score}
+    return base | {"market": signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-union-expression-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(
+            hint
+            for hint in payload["api_contract_hints"]
+            if hint["route"] == "GET /api/payload-union-expression-pricing-snapshot"
+        )
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_from_conditional_return_expression(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/conditional-expression-pricing-snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return {"pricing_score": signal.pricing_score, "market": signal.market} if signal else {}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(
+            hint
+            for hint in payload["api_contract_hints"]
+            if hint["route"] == "GET /api/conditional-expression-pricing-snapshot"
+        )
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_dict_union_update(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    payload = {"pricing_score": signal.pricing_score}
+    payload |= {"market": signal.market}
+    return payload
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-union-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/payload-union-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_two_hop_package_reexport_depends(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "api_exports.py").write_text(
+            """
+from backend.deps import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.api_exports import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend import get_service
+
+router = APIRouter()
+
+@router.get("/api/two-hop-package-reexport-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/two-hop-package-reexport-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_annotated_depends_provider(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+
+def provide_service():
+    return get_service()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+from backend.deps import provide_service
+from backend.services import SnapshotService
+
+router = APIRouter()
+
+@router.get("/api/annotated-depends-pricing-snapshot")
+async def pricing_snapshot(service: Annotated[SnapshotService, Depends(provide_service)]):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/annotated-depends-pricing-snapshot")
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
+    def test_project_profile_infers_api_response_field_sources_through_multi_dependency_service_factory(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "repository.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotRepository:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    def fetch_signal(self):
+        return fetch_signal(self.MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "formatters.py").write_text(
+            """
+class SnapshotFormatter:
+    def render(self, signal):
+        return {"pricing_score": signal.pricing_score, "market": signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotService:
+    def __init__(self, repo, formatter):
+        self.repo = repo
+        self.formatter = formatter
+
+    async def build_snapshot(self):
+        signal = self.repo.fetch_signal()
+        return self.formatter.render(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from fastapi import Depends
+
+from backend.formatters import SnapshotFormatter
+from backend.models import MarketSignal
+from backend.repository import SnapshotRepository
+from backend.services import SnapshotService
+
+def get_repo():
+    return SnapshotRepository(MarketSignal)
+
+def get_formatter():
+    return SnapshotFormatter()
+
+def get_service(
+    repo = Depends(get_repo),
+    formatter = Depends(get_formatter),
+):
+    return SnapshotService(repo, formatter)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend.deps import get_service
+
+router = APIRouter()
+
+@router.get("/api/multi-dependency-factory-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        hint = next(
+            hint for hint in payload["api_contract_hints"] if hint["route"] == "GET /api/multi-dependency-factory-pricing-snapshot"
+        )
+        self.assertEqual(
+            hint["response_field_sources"],
+            [
+                {"name": "market", "source_fields": [{"relation": "analytics.market_signals", "column": "market"}]},
+                {"name": "pricing_score", "source_fields": [{"relation": "analytics.market_signals", "column": "pricing_score"}]},
+            ],
+        )
+
     def test_structure_scan_binds_api_fields_from_pydantic_model_dump(self) -> None:
         backend_dir = self.root / "backend"
         backend_dir.mkdir(parents=True, exist_ok=True)
@@ -1471,6 +3432,76 @@ def pricing_snapshot(session):
             node
             for node in observed_nodes.values()
             if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/pydantic-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_from_dataclass_asdict_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "serializers.py").write_text(
+            """
+from dataclasses import dataclass
+
+@dataclass
+class PricingSnapshot:
+    pricing_score: float
+    market: str
+
+def serialize_signal(signal):
+    return PricingSnapshot(pricing_score=signal.pricing_score, market=signal.market)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from dataclasses import asdict
+
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+from backend.serializers import serialize_signal
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/dataclass-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return asdict(serialize_signal(signal))
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/dataclass-scan-pricing-snapshot"
         )
         data_node = observed_nodes["data:analytics_market_signals"]
         data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
@@ -1544,6 +3575,1549 @@ def pricing_snapshot(session):
             node
             for node in observed_nodes.values()
             if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/service-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_across_imported_service_modules(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+from backend.services import SnapshotService
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/imported-service-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    return SnapshotService(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/imported-service-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_module_alias_import(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+import backend.services as svc
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/module-alias-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    return svc.SnapshotService(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/module-alias-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_package_module_alias_reexport(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.services import SnapshotService
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+import backend as backend_pkg
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/package-module-alias-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    return backend_pkg.SnapshotService(session, MarketSignal).build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/package-module-alias-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_imported_factory_return_object(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(session, MarketSignal):
+    return session.query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, session, MarketSignal):
+        self.session = session
+        self.MarketSignal = MarketSignal
+
+    def build_snapshot(self):
+        signal = fetch_signal(self.session, self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "factories.py").write_text(
+            """
+from backend.services import SnapshotService
+
+def build_service(session, MarketSignal):
+    return SnapshotService(session, MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+import backend.factories as factory_mod
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/factory-object-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    service = factory_mod.build_service(session, MarketSignal)
+    return service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/factory-object-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_async_depends_service(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+def fetch_signal(MarketSignal):
+    return session.query(MarketSignal).first()
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+
+def get_service():
+    return SnapshotService(MarketSignal)
+
+@router.get("/api/async-depends-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    payload = await service.build_snapshot()
+    return payload
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/async-depends-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_async_imported_wrapper_chain(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "serializers.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+from backend.serializers import SnapshotSerializer
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "factories.py").write_text(
+            """
+from backend.services import SnapshotService
+
+def build_service(MarketSignal):
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "wrappers.py").write_text(
+            """
+from backend.factories import build_service
+from backend.models import MarketSignal
+
+async def build_payload():
+    service = build_service(MarketSignal)
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+import backend.wrappers as wrapper_mod
+
+router = APIRouter()
+
+@router.get("/api/async-wrapper-scan-pricing-snapshot")
+async def pricing_snapshot():
+    return await wrapper_mod.build_payload()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/async-wrapper-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_module_alias_depends_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+import backend.deps as deps_mod
+
+router = APIRouter()
+
+@router.get("/api/module-alias-depends-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(deps_mod.get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/module-alias-depends-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_package_reexport_depends_helper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.deps import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend import get_service
+
+router = APIRouter()
+
+@router.get("/api/package-reexport-depends-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/package-reexport-depends-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_nested_depends_chain(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "repository.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotRepository:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    def fetch_signal(self):
+        return fetch_signal(self.MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, repo):
+        self.repo = repo
+
+    async def build_snapshot(self):
+        signal = self.repo.fetch_signal()
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from fastapi import Depends
+
+from backend.models import MarketSignal
+from backend.repository import SnapshotRepository
+from backend.services import SnapshotService
+
+def get_repo():
+    return SnapshotRepository(MarketSignal)
+
+def get_service(repo = Depends(get_repo)):
+    return SnapshotService(repo)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend.deps import get_service
+
+router = APIRouter()
+
+@router.get("/api/nested-depends-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/nested-depends-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_payload_merge_wrapper(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    base = {"pricing_score": signal.pricing_score}
+    payload = {**base}
+    payload.update({"market": signal.market})
+    return payload
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-merge-scan-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/payload-merge-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_object_method_payload_passthrough(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotFormatter:
+    def finalize(self, payload, signal):
+        payload["market"] = signal.market
+        return payload
+
+class SnapshotService:
+    def __init__(self, formatter):
+        self.formatter = formatter
+
+    def build_snapshot(self, signal):
+        payload = {"pricing_score": signal.pricing_score}
+        return self.formatter.finalize(payload, signal)
+
+def build_service():
+    return SnapshotService(SnapshotFormatter())
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.models import MarketSignal
+from backend.services import build_service
+
+router = APIRouter()
+
+@router.get("/api/object-method-passthrough-scan-pricing-snapshot")
+def pricing_snapshot():
+    signal = query(MarketSignal).first()
+    return build_service().build_snapshot(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/object-method-passthrough-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_dict_union_expression(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    base = {"pricing_score": signal.pricing_score}
+    return base | {"market": signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-union-expression-scan-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/payload-union-expression-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_from_conditional_return_expression(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+
+@router.get("/api/conditional-expression-scan-pricing-snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return {"pricing_score": signal.pricing_score, "market": signal.market} if signal else {}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/conditional-expression-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_dict_union_update(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+
+def build_payload(signal):
+    payload = {"pricing_score": signal.pricing_score}
+    payload |= {"market": signal.market}
+    return payload
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+
+from backend.helpers import build_payload, fetch_signal
+from backend.models import MarketSignal
+
+router = APIRouter()
+
+@router.get("/api/payload-union-scan-pricing-snapshot")
+def pricing_snapshot():
+    signal = fetch_signal(MarketSignal)
+    return build_payload(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/payload-union-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_two_hop_package_reexport_depends(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "api_exports.py").write_text(
+            """
+from backend.deps import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "__init__.py").write_text(
+            """
+from backend.api_exports import get_service
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend import get_service
+
+router = APIRouter()
+
+@router.get("/api/two-hop-package-reexport-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/two-hop-package-reexport-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_annotated_depends_provider(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotSerializer:
+    def __init__(self, signal):
+        self.signal = signal
+
+    def to_dict(self):
+        return {"pricing_score": self.signal.pricing_score, "market": self.signal.market}
+
+class SnapshotService:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    async def build_snapshot(self):
+        signal = fetch_signal(self.MarketSignal)
+        return SnapshotSerializer(signal).to_dict()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from backend.models import MarketSignal
+from backend.services import SnapshotService
+
+def get_service():
+    return SnapshotService(MarketSignal)
+
+def provide_service():
+    return get_service()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+from backend.deps import provide_service
+from backend.services import SnapshotService
+
+router = APIRouter()
+
+@router.get("/api/annotated-depends-scan-pricing-snapshot")
+async def pricing_snapshot(service: Annotated[SnapshotService, Depends(provide_service)]):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/annotated-depends-scan-pricing-snapshot"
+        )
+        data_node = observed_nodes["data:analytics_market_signals"]
+        data_fields = {column["name"]: column["id"] for column in data_node["columns"]}
+        pricing_score_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "pricing_score")
+        market_field = next(field for field in api_node["contract"]["fields"] if field["name"] == "market")
+        self.assertEqual(pricing_score_field["primary_binding"], data_fields["pricing_score"])
+        self.assertEqual(market_field["primary_binding"], data_fields["market"])
+
+    def test_structure_scan_binds_api_fields_through_multi_dependency_service_factory(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Column, Integer, Numeric, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    market = Column(String(32))
+    pricing_score = Column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "helpers.py").write_text(
+            """
+def fetch_signal(MarketSignal):
+    return query(MarketSignal).first()
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "repository.py").write_text(
+            """
+from backend.helpers import fetch_signal
+
+class SnapshotRepository:
+    def __init__(self, MarketSignal):
+        self.MarketSignal = MarketSignal
+
+    def fetch_signal(self):
+        return fetch_signal(self.MarketSignal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "formatters.py").write_text(
+            """
+class SnapshotFormatter:
+    def render(self, signal):
+        return {"pricing_score": signal.pricing_score, "market": signal.market}
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "services.py").write_text(
+            """
+class SnapshotService:
+    def __init__(self, repo, formatter):
+        self.repo = repo
+        self.formatter = formatter
+
+    async def build_snapshot(self):
+        signal = self.repo.fetch_signal()
+        return self.formatter.render(signal)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "deps.py").write_text(
+            """
+from fastapi import Depends
+
+from backend.formatters import SnapshotFormatter
+from backend.models import MarketSignal
+from backend.repository import SnapshotRepository
+from backend.services import SnapshotService
+
+def get_repo():
+    return SnapshotRepository(MarketSignal)
+
+def get_formatter():
+    return SnapshotFormatter()
+
+def get_service(
+    repo = Depends(get_repo),
+    formatter = Depends(get_formatter),
+):
+    return SnapshotService(repo, formatter)
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter, Depends
+from backend.deps import get_service
+
+router = APIRouter()
+
+@router.get("/api/multi-dependency-factory-scan-pricing-snapshot")
+async def pricing_snapshot(service = Depends(get_service)):
+    return await service.build_snapshot()
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        bundle = response.json()["bundle"]
+        observed_nodes = {node["id"]: node for node in bundle["observed"]["nodes"]}
+        api_node = next(
+            node
+            for node in observed_nodes.values()
+            if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/multi-dependency-factory-scan-pricing-snapshot"
         )
         data_node = observed_nodes["data:analytics_market_signals"]
         data_fields = {column["name"]: column["id"] for column in data_node["columns"]}

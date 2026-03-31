@@ -343,6 +343,10 @@ class StructuralPatch(WorkbenchModel):
     confidence: Literal["high", "medium", "low"] = "medium"
     evidence: list[str] = Field(default_factory=list)
     review_state: Literal["pending", "accepted", "rejected", "deferred"] = "pending"
+    reviewed_at: str = ""
+    reviewed_by: str = ""
+    review_note: str = ""
+    review_history: list[dict[str, Any]] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -357,12 +361,22 @@ class ContradictionRecord(WorkbenchModel):
     target_id: str = ""
     node_id: str = ""
     field_id: str = ""
+    kind: str = ""
+    severity: str = ""
     existing_belief: dict[str, Any] = Field(default_factory=dict)
     new_evidence: dict[str, Any] = Field(default_factory=dict)
     affected_refs: list[str] = Field(default_factory=list)
     confidence_delta: str = ""
     downstream_impacts: list[str] = Field(default_factory=list)
+    evidence_sources: list[str] = Field(default_factory=list)
+    message: str = ""
+    why_this_matters: str = ""
     review_required: bool = True
+    review_state: Literal["pending", "accepted", "rejected", "deferred"] = "pending"
+    reviewed_at: str = ""
+    reviewed_by: str = ""
+    review_note: str = ""
+    review_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ScanMetadata(WorkbenchModel):
@@ -371,6 +385,9 @@ class ScanMetadata(WorkbenchModel):
     scope: str = "full"
     root_path: str = ""
     doc_paths: list[str] = Field(default_factory=list)
+    selected_paths: list[str] = Field(default_factory=list)
+    include_tests: bool = False
+    include_internal: bool = True
     fingerprint: str = ""
     scanner_versions: dict[str, str] = Field(default_factory=dict)
     base_structure_version: int = 1
@@ -381,8 +398,26 @@ class ReviewSummary(WorkbenchModel):
     accepted_patch_ids: list[str] = Field(default_factory=list)
     rejected_patch_ids: list[str] = Field(default_factory=list)
     deferred_patch_ids: list[str] = Field(default_factory=list)
+    bundle_owner: str = ""
+    assigned_reviewer: str = ""
+    triage_state: Literal["new", "in_review", "blocked", "resolved"] = "new"
+    triage_note: str = ""
+    workflow_history: list[dict[str, Any]] = Field(default_factory=list)
+    last_reviewed_at: str = ""
+    last_reviewed_by: str = ""
+    last_review_note: str = ""
     merged_at: str = ""
     merged_by: str = ""
+    merge_status: str = ""
+    rebase_required: bool = False
+    merge_patch_ids: list[str] = Field(default_factory=list)
+    merge_blockers: list[dict[str, Any]] = Field(default_factory=list)
+    merge_plan: dict[str, Any] = Field(default_factory=dict)
+    rebased_from_bundle_id: str = ""
+    superseded_by_bundle_id: str = ""
+    superseded_at: str = ""
+    superseded_by: str = ""
+    last_rebase_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReadinessIssue(WorkbenchModel):

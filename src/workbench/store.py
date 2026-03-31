@@ -215,6 +215,7 @@ def list_bundles() -> list[dict[str, Any]]:
         with path.open(encoding="utf-8") as file:
             payload = yaml.safe_load(file) or {}
         bundle = ScanBundle.model_validate(payload).model_dump(mode="json")
+        review = bundle.get("review", {})
         items.append(
             {
                 "bundle_id": bundle["bundle_id"],
@@ -225,12 +226,45 @@ def list_bundles() -> list[dict[str, Any]]:
                 "patch_count": len(bundle.get("patches", [])),
                 "pending_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending"),
                 "accepted_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "accepted"),
+                "rejected_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "rejected"),
+                "deferred_count": sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "deferred"),
                 "contradiction_count": len(bundle.get("contradictions", [])),
+                "review_required_count": sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)),
+                "high_severity_contradiction_count": bundle.get("reconciliation", {}).get("contradiction_summary", {}).get("severity_counts", {}).get("high", 0),
+                "contradiction_cluster_count": len(bundle.get("reconciliation", {}).get("contradiction_clusters", [])),
+                "open_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("open_count", 0),
+                "resolved_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolved_count", 0),
+                "mixed_contradiction_cluster_count": bundle.get("reconciliation", {}).get("contradiction_cluster_summary", {}).get("resolution_state_counts", {}).get("mixed", 0),
+                "field_matrix_review_required_count": bundle.get("reconciliation", {}).get("field_matrix_summary", {}).get("review_required_count", 0),
+                "bundle_owner": review.get("bundle_owner", ""),
+                "assigned_reviewer": review.get("assigned_reviewer", ""),
+                "triage_state": review.get("triage_state", "new"),
+                "triage_note": review.get("triage_note", ""),
+                "last_reviewed_at": review.get("last_reviewed_at", ""),
+                "last_reviewed_by": review.get("last_reviewed_by", ""),
+                "merged_at": review.get("merged_at", ""),
+                "merged_by": review.get("merged_by", ""),
+                "merge_status": review.get("merge_status", ""),
+                "rebase_required": bool(review.get("rebase_required", False)),
+                "rebased_from_bundle_id": review.get("rebased_from_bundle_id", ""),
+                "superseded_by_bundle_id": review.get("superseded_by_bundle_id", ""),
+                "merge_plan_status": review.get("merge_plan", {}).get("status", ""),
+                "merge_plan_noop_count": review.get("merge_plan", {}).get("noop_count", 0),
+                "merge_plan_blocked_step_count": review.get("merge_plan", {}).get("blocked_step_count", 0),
+                "ready_to_merge": bool(review.get("merge_patch_ids"))
+                and sum(1 for patch in bundle.get("patches", []) if patch.get("review_state") == "pending") == 0
+                and sum(1 for item in bundle.get("contradictions", []) if item.get("review_required", True)) == 0
+                and not bool(review.get("rebase_required", False))
+                and not bool(review.get("superseded_by_bundle_id", ""))
+                and review.get("merge_plan", {}).get("status", "") in {"ready", "empty"},
                 "readiness_status": bundle.get("readiness", {}).get("status", "Not Ready"),
                 "planned_missing_count": bundle.get("reconciliation", {}).get("summary", {}).get("planned_missing", 0),
                 "observed_untracked_count": bundle.get("reconciliation", {}).get("summary", {}).get("observed_untracked", 0),
                 "implemented_differently_count": bundle.get("reconciliation", {}).get("summary", {}).get("implemented_differently", 0),
                 "uncertain_matches_count": bundle.get("reconciliation", {}).get("summary", {}).get("uncertain_matches", 0),
+                "binding_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("binding_mismatches", 0),
+                "column_mismatch_count": bundle.get("reconciliation", {}).get("comparison", {}).get("column_mismatches", 0),
+                "downstream_breakage_count": bundle.get("reconciliation", {}).get("downstream_breakage", {}).get("count", 0),
             }
         )
     return items
@@ -255,6 +289,121 @@ def _normalize_reconciliation(reconciliation: dict[str, Any]) -> dict[str, Any]:
         "observed_untracked": int(summary.get("observed_untracked", 0) or 0),
         "implemented_differently": int(summary.get("implemented_differently", 0) or 0),
         "uncertain_matches": int(summary.get("uncertain_matches", 0) or 0),
+    }
+    comparison = normalized.get("comparison", {})
+    normalized["comparison"] = {
+        "plan_candidates": int(comparison.get("plan_candidates", 0) or 0),
+        "plan_paths": sorted(comparison.get("plan_paths", []) or []),
+        "planned_nodes": int(comparison.get("planned_nodes", 0) or 0),
+        "matched_nodes": int(comparison.get("matched_nodes", 0) or 0),
+        "planned_fields": int(comparison.get("planned_fields", 0) or 0),
+        "matched_fields": int(comparison.get("matched_fields", 0) or 0),
+        "planned_bindings": int(comparison.get("planned_bindings", 0) or 0),
+        "matched_bindings": int(comparison.get("matched_bindings", 0) or 0),
+        "binding_mismatches": int(comparison.get("binding_mismatches", 0) or 0),
+        "column_mismatches": int(comparison.get("column_mismatches", 0) or 0),
+        "missing_fields": int(comparison.get("missing_fields", 0) or 0),
+        "unplanned_fields": int(comparison.get("unplanned_fields", 0) or 0),
+    }
+    field_matrix_summary = normalized.get("field_matrix_summary", {})
+    field_matrix_status_counts = field_matrix_summary.get("status_counts", {}) if isinstance(field_matrix_summary, dict) else {}
+    normalized["field_matrix_summary"] = {
+        "count": int(field_matrix_summary.get("count", 0) or 0),
+        "review_required_count": int(field_matrix_summary.get("review_required_count", 0) or 0),
+        "unresolved_count": int(field_matrix_summary.get("unresolved_count", 0) or 0),
+        "implemented_differently_count": int(field_matrix_summary.get("implemented_differently_count", 0) or 0),
+        "status_counts": {
+            "matched": int(field_matrix_status_counts.get("matched", 0) or 0),
+            "planned_missing": int(field_matrix_status_counts.get("planned_missing", 0) or 0),
+            "observed_unplanned": int(field_matrix_status_counts.get("observed_unplanned", 0) or 0),
+            "binding_mismatch": int(field_matrix_status_counts.get("binding_mismatch", 0) or 0),
+            "lineage_mismatch": int(field_matrix_status_counts.get("lineage_mismatch", 0) or 0),
+            "column_type_mismatch": int(field_matrix_status_counts.get("column_type_mismatch", 0) or 0),
+            "uncertain": int(field_matrix_status_counts.get("uncertain", 0) or 0),
+        },
+    }
+    normalized["field_matrix"] = sorted(
+        normalized.get("field_matrix", []),
+        key=lambda item: (
+            item.get("scope", ""),
+            item.get("node_ref", ""),
+            item.get("field_name", ""),
+            item.get("row_id", ""),
+        ),
+    )
+    contradiction_summary = normalized.get("contradiction_summary", {})
+    severity_counts = contradiction_summary.get("severity_counts", {}) if isinstance(contradiction_summary, dict) else {}
+    normalized["contradiction_summary"] = {
+        "count": int(contradiction_summary.get("count", 0) or 0),
+        "review_required_count": int(contradiction_summary.get("review_required_count", 0) or 0),
+        "severity_counts": {
+            "high": int(severity_counts.get("high", 0) or 0),
+            "medium": int(severity_counts.get("medium", 0) or 0),
+            "low": int(severity_counts.get("low", 0) or 0),
+        },
+        "kinds": sorted(
+            contradiction_summary.get("kinds", []),
+            key=lambda item: (
+                -int(item.get("count", 0) or 0),
+                item.get("kind", ""),
+            ),
+        ),
+        "targets": sorted(
+            contradiction_summary.get("targets", []),
+            key=lambda item: (
+                -int(item.get("count", 0) or 0),
+                item.get("target_id", ""),
+            ),
+        ),
+    }
+    normalized["contradiction_clusters"] = sorted(
+        normalized.get("contradiction_clusters", []),
+        key=lambda item: (
+            item.get("target_id", ""),
+            item.get("kind", ""),
+            item.get("cluster_id", ""),
+        ),
+    )
+    contradiction_cluster_summary = normalized.get("contradiction_cluster_summary", {})
+    cluster_state_counts = contradiction_cluster_summary.get("resolution_state_counts", {}) if isinstance(contradiction_cluster_summary, dict) else {}
+    normalized["contradiction_cluster_summary"] = {
+        "count": int(contradiction_cluster_summary.get("count", 0) or 0),
+        "open_count": int(contradiction_cluster_summary.get("open_count", 0) or 0),
+        "resolved_count": int(contradiction_cluster_summary.get("resolved_count", 0) or 0),
+        "high_risk_open_count": int(contradiction_cluster_summary.get("high_risk_open_count", 0) or 0),
+        "resolution_state_counts": {
+            "pending": int(cluster_state_counts.get("pending", 0) or 0),
+            "accepted": int(cluster_state_counts.get("accepted", 0) or 0),
+            "rejected": int(cluster_state_counts.get("rejected", 0) or 0),
+            "deferred": int(cluster_state_counts.get("deferred", 0) or 0),
+            "mixed": int(cluster_state_counts.get("mixed", 0) or 0),
+        },
+    }
+    downstream_breakage = normalized.get("downstream_breakage", {})
+    normalized["downstream_breakage"] = {
+        "count": int(downstream_breakage.get("count", 0) or 0),
+        "items": sorted(
+            downstream_breakage.get("items", []),
+            key=lambda item: (
+                item.get("target_id", ""),
+                item.get("message", ""),
+                item.get("source", ""),
+            ),
+        ),
+        "by_source": sorted(
+            downstream_breakage.get("by_source", []),
+            key=lambda item: (
+                -int(item.get("count", 0) or 0),
+                item.get("source", ""),
+            ),
+        ),
+        "targets": sorted(
+            downstream_breakage.get("targets", []),
+            key=lambda item: (
+                -int(item.get("count", 0) or 0),
+                item.get("target_id", ""),
+            ),
+        ),
     }
     for key in ("planned_missing", "observed_untracked", "implemented_differently", "uncertain_matches"):
         normalized[key] = sorted(

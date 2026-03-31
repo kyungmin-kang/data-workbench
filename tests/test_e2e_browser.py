@@ -26,6 +26,9 @@ def find_chromium_executable() -> str | None:
     candidates = [
         *ROOT_DIR.glob(".playwright-browsers/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"),
         *Path.home().glob("Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -35,7 +38,10 @@ def find_chromium_executable() -> str | None:
 
 def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except PermissionError as error:  # pragma: no cover - sandbox-specific
+            raise unittest.SkipTest(f"Local port binding is not permitted in this environment: {error}") from error
         return int(sock.getsockname()[1])
 
 
@@ -87,15 +93,18 @@ class BrowserE2ETests(unittest.TestCase):
 
             page.get_by_text("More").click()
             page.get_by_role("button", name="Discover Project").click()
+            page.get_by_role("button", name="Add / Import").click()
+            page.locator("#authoring-drawer").wait_for(timeout=10_000)
+            page.wait_for_function("() => { const button = document.getElementById('project-profile-button'); return Boolean(button) && !button.disabled; }", timeout=10_000)
+            page.locator('[data-project-wizard-step="2"]').click()
             page.locator("[data-project-import-load]").first.wait_for(timeout=10_000)
             page.locator("[data-project-import-load]").first.click()
 
-            page.get_by_role("button", name="Add / Import").click()
             raw_asset_value = page.locator('[data-authoring-path="import.rawAssetValue"]').input_value()
             self.assertTrue(raw_asset_value)
 
             page.get_by_role("button", name="Import asset into graph").click()
-            page.locator("#status-text").filter(has_text="Asset imported").wait_for(timeout=10_000)
+            page.wait_for_function("() => (document.getElementById('status-text')?.textContent || '').includes('Asset imported')", timeout=10_000)
             dirty_label = page.locator("#dirty-indicator").text_content() or ""
             self.assertIn("Unsaved", dirty_label)
 
@@ -110,42 +119,135 @@ class BrowserE2ETests(unittest.TestCase):
             page = browser.new_page(viewport={"width": 1680, "height": 1200})
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
 
-            market_signals = page.locator('[data-node-id="data:market_signals"]').first
-            market_signals.locator('[data-graph-toggle-expand="data:market_signals"]').click()
+            pricing_features = page.locator('[data-node-id="data:pricing_features"]').first
+            pricing_features.locator('[data-graph-toggle-expand="data:pricing_features"]').click()
 
             self.assertEqual(
-                page.locator('[data-node-id="data:market_signals"] [data-graph-column-add="data:market_signals"]').count(),
+                page.locator('[data-node-id="data:pricing_features"] [data-graph-column-add="data:pricing_features"]').count(),
                 0,
             )
 
-            page.get_by_role("button", name="Edit").click()
+            page.locator("#edit-mode-button").click()
 
-            add_button = page.locator('[data-node-id="data:market_signals"] [data-graph-column-add="data:market_signals"]')
+            add_button = page.locator('[data-node-id="data:pricing_features"] [data-graph-column-add="data:pricing_features"]')
             add_button.wait_for(timeout=10_000)
             add_button.click()
 
-            pending_name = page.locator('[data-node-id="data:market_signals"] .graph-table-add-row [data-graph-column-field="name"]').first
+            pending_name = page.locator('[data-node-id="data:pricing_features"] .graph-table-add-row [data-graph-column-field="name"]').first
             pending_name.fill("browser_test_metric")
-            page.locator('[data-node-id="data:market_signals"] [data-graph-column-cancel^="data:market_signals:"]').first.click()
+            page.locator('[data-node-id="data:pricing_features"] [data-graph-column-cancel^="data:pricing_features:"]').first.click()
             self.assertEqual(
-                page.locator('[data-node-id="data:market_signals"] .graph-table-add-row [data-graph-column-field="name"]').count(),
+                page.locator('[data-node-id="data:pricing_features"] .graph-table-add-row [data-graph-column-field="name"]').count(),
                 0,
             )
 
             add_button.click()
-            pending_name = page.locator('[data-node-id="data:market_signals"] .graph-table-add-row [data-graph-column-field="name"]').first
+            pending_name = page.locator('[data-node-id="data:pricing_features"] .graph-table-add-row [data-graph-column-field="name"]').first
             pending_name.fill("browser_test_metric")
-            page.locator('[data-node-id="data:market_signals"] [data-graph-column-commit^="data:market_signals:"]').first.click()
-            page.locator('[data-node-id="data:market_signals"] [data-graph-column-field="name"][value="browser_test_metric"]').first.wait_for(timeout=10_000)
+            page.locator('[data-node-id="data:pricing_features"] [data-graph-column-commit^="data:pricing_features:"]').first.click()
+            page.locator('[data-node-id="data:pricing_features"] [data-graph-column-field="name"][value="browser_test_metric"]').first.wait_for(timeout=10_000)
 
-            note_inputs = page.locator('[data-node-id="data:market_signals"] [data-graph-work-item-field="text"][data-graph-node-id="data:market_signals"]')
+            note_inputs = page.locator('[data-node-id="data:pricing_features"] [data-graph-work-item-field="text"][data-graph-node-id="data:pricing_features"]')
             before_count = note_inputs.count()
-            page.locator('[data-node-id="data:market_signals"] [data-graph-work-item-add="data:market_signals"]').click()
+            page.locator('[data-node-id="data:pricing_features"] [data-graph-work-item-add="data:pricing_features"]').click()
             self.assertEqual(note_inputs.count(), before_count + 1)
-            page.locator('[data-node-id="data:market_signals"] [data-graph-work-item-remove^="data:market_signals:"]').last.click()
+            page.locator('[data-node-id="data:pricing_features"] [data-graph-work-item-remove^="data:pricing_features:"]').last.click()
             page.locator("#confirm-modal").wait_for(timeout=10_000)
             page.locator("#confirm-modal-ok").click()
             self.assertEqual(note_inputs.count(), before_count)
+
+            browser.close()
+
+    def test_structure_review_surface_shows_contradictions_and_review_actions(self) -> None:
+        executable_path = find_chromium_executable()
+        assert executable_path is not None
+
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "pricing.py").write_text(
+            """
+from fastapi import APIRouter
+from sqlalchemy import Column, Integer, Numeric
+from sqlalchemy.orm import declarative_base
+
+router = APIRouter()
+Base = declarative_base()
+
+class MarketSignal(Base):
+    __tablename__ = "market_signals"
+    __table_args__ = {"schema": "analytics"}
+
+    id = Column(Integer, primary_key=True)
+    median_home_price = Column(Numeric)
+    pricing_score = Column(Numeric)
+    shadow_inventory_index = Column(Numeric)
+
+@router.get("/api/markets/snapshot")
+def pricing_snapshot(session):
+    signal = session.query(MarketSignal).first()
+    return {
+        "median_home_price": signal.median_home_price,
+        "pricing_score": signal.pricing_score,
+        "shadow_inventory_index": signal.shadow_inventory_index,
+    }
+""".strip(),
+            encoding="utf-8",
+        )
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            page = browser.new_page(viewport={"width": 1680, "height": 1200})
+            page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
+
+            page.get_by_role("button", name="Scout scan").click()
+            page.locator("#review-drawer-toggle").click()
+            page.locator("#review-drawer-content").get_by_text("Contradiction review").wait_for(timeout=15_000)
+            page.locator("#review-drawer-content").get_by_text("Patch review inbox").wait_for(timeout=15_000)
+            page.locator("#review-drawer-content").get_by_text("PricingScoreCard will not render").first.wait_for(timeout=15_000)
+
+            adopt_observed = page.locator("#review-drawer-content").get_by_role("button", name="Adopt observed").first
+            adopt_observed.wait_for(timeout=10_000)
+            adopt_observed.click()
+            page.locator("#review-action-modal").wait_for(timeout=10_000)
+            page.locator("#review-action-modal-note").fill("Observed backend binding is ready to adopt.")
+            page.locator("#review-action-modal").get_by_role("button", name="Adopt observed").click()
+            page.locator("#review-drawer-content").get_by_text("accepted: 1").first.wait_for(timeout=15_000)
+            page.locator("#review-drawer-content").get_by_text("Contradiction audit trail").first.wait_for(timeout=15_000)
+
+            browser.close()
+
+    def test_structure_review_workflow_assignment_and_keyboard_review(self) -> None:
+        executable_path = find_chromium_executable()
+        assert executable_path is not None
+
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "keyboard_review.md").write_text(
+            "GET /api/demo/keyboard-a\nGET /api/demo/keyboard-b\n",
+            encoding="utf-8",
+        )
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True, executable_path=executable_path)
+            page = browser.new_page(viewport={"width": 1680, "height": 1200})
+            page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
+
+            page.get_by_role("button", name="Scout scan").click()
+            page.locator("#review-drawer-toggle").click()
+            page.locator("#review-drawer-content").get_by_role("heading", name="Review workflow").wait_for(timeout=15_000)
+
+            page.locator('#review-drawer-content [data-structure-pref="reviewer_identity"]').fill("ux-reviewer")
+            page.locator("#review-drawer-content").get_by_role("button", name="Assign to me").click()
+            page.locator("#review-drawer-content").get_by_text("reviewer ux-reviewer").first.wait_for(timeout=15_000)
+
+            page.locator("#review-drawer-content .structure-keyboard-help").click()
+            page.keyboard.press("a")
+            page.locator("#review-action-modal").wait_for(timeout=10_000)
+            page.locator("#review-action-modal").get_by_role("button", name="Accept").click()
+            page.wait_for_function(
+                "() => (document.getElementById('status-text')?.textContent || '').includes('Patch review updated')",
+                timeout=15_000,
+            )
 
             browser.close()
 

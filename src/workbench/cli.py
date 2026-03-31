@@ -9,7 +9,14 @@ from typing import Any
 import yaml
 
 from .store import export_canonical_yaml_text, get_root_dir, list_bundles, load_bundle
-from .structure_memory import import_yaml_spec, merge_bundle, review_bundle_patch, scan_structure
+from .structure_memory import (
+    import_yaml_spec,
+    merge_bundle,
+    preview_rebase_bundle,
+    rebase_bundle,
+    review_bundle_patch,
+    scan_structure,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
     merge_parser.add_argument("--merged-by", default="user")
     merge_parser.set_defaults(handler=handle_merge)
 
+    rebase_parser = subparsers.add_parser("rebase", help="Regenerate a bundle against the latest canonical YAML")
+    rebase_parser.add_argument("bundle_id")
+    rebase_parser.add_argument("--preserve-reviews", dest="preserve_reviews", action="store_true", default=True)
+    rebase_parser.add_argument("--no-preserve-reviews", dest="preserve_reviews", action="store_false")
+    rebase_parser.set_defaults(handler=handle_rebase)
+
+    rebase_preview_parser = subparsers.add_parser("rebase-preview", help="Preview how a stale bundle would rebase")
+    rebase_preview_parser.add_argument("bundle_id")
+    rebase_preview_parser.add_argument("--preserve-reviews", dest="preserve_reviews", action="store_true", default=True)
+    rebase_preview_parser.add_argument("--no-preserve-reviews", dest="preserve_reviews", action="store_false")
+    rebase_preview_parser.set_defaults(handler=handle_rebase_preview)
+
     return parser
 
 
@@ -124,6 +143,21 @@ def handle_import_like(args: argparse.Namespace) -> str:
                 "patch_count": len(result["bundle"]["patches"]),
                 "role": result["bundle"]["scan"]["role"],
                 "scope": result["bundle"]["scan"]["scope"],
+                "planned_missing": result["bundle"]["reconciliation"].get("summary", {}).get("planned_missing", 0),
+                "observed_untracked": result["bundle"]["reconciliation"].get("summary", {}).get("observed_untracked", 0),
+                "implemented_differently": result["bundle"]["reconciliation"].get("summary", {}).get("implemented_differently", 0),
+                "uncertain_matches": result["bundle"]["reconciliation"].get("summary", {}).get("uncertain_matches", 0),
+                "binding_mismatches": result["bundle"]["reconciliation"].get("comparison", {}).get("binding_mismatches", 0),
+                "column_mismatches": result["bundle"]["reconciliation"].get("comparison", {}).get("column_mismatches", 0),
+                "field_matrix_review_required_count": result["bundle"]["reconciliation"].get("field_matrix_summary", {}).get("review_required_count", 0),
+                "contradiction_cluster_count": len(result["bundle"]["reconciliation"].get("contradiction_clusters", [])),
+                "open_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("open_count", 0),
+                "resolved_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("resolved_count", 0),
+                "mixed_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("resolution_state_counts", {}).get("mixed", 0),
+                "high_severity_contradictions": result["bundle"]["reconciliation"].get("contradiction_summary", {}).get("severity_counts", {}).get("high", 0),
+                "downstream_breakage_count": result["bundle"]["reconciliation"].get("downstream_breakage", {}).get("count", 0),
+                "merge_plan_status": result["bundle"].get("review", {}).get("merge_plan", {}).get("status", ""),
+                "merge_plan_noop_count": result["bundle"].get("review", {}).get("merge_plan", {}).get("noop_count", 0),
             },
             indent=2,
         )
@@ -143,6 +177,21 @@ def handle_import_like(args: argparse.Namespace) -> str:
             "patch_count": len(result["bundle"]["patches"]),
             "role": result["bundle"]["scan"]["role"],
             "scope": result["bundle"]["scan"]["scope"],
+            "planned_missing": result["bundle"]["reconciliation"].get("summary", {}).get("planned_missing", 0),
+            "observed_untracked": result["bundle"]["reconciliation"].get("summary", {}).get("observed_untracked", 0),
+            "implemented_differently": result["bundle"]["reconciliation"].get("summary", {}).get("implemented_differently", 0),
+            "uncertain_matches": result["bundle"]["reconciliation"].get("summary", {}).get("uncertain_matches", 0),
+            "binding_mismatches": result["bundle"]["reconciliation"].get("comparison", {}).get("binding_mismatches", 0),
+            "column_mismatches": result["bundle"]["reconciliation"].get("comparison", {}).get("column_mismatches", 0),
+            "field_matrix_review_required_count": result["bundle"]["reconciliation"].get("field_matrix_summary", {}).get("review_required_count", 0),
+            "contradiction_cluster_count": len(result["bundle"]["reconciliation"].get("contradiction_clusters", [])),
+            "open_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("open_count", 0),
+            "resolved_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("resolved_count", 0),
+            "mixed_contradiction_clusters": result["bundle"]["reconciliation"].get("contradiction_cluster_summary", {}).get("resolution_state_counts", {}).get("mixed", 0),
+            "high_severity_contradictions": result["bundle"]["reconciliation"].get("contradiction_summary", {}).get("severity_counts", {}).get("high", 0),
+            "downstream_breakage_count": result["bundle"]["reconciliation"].get("downstream_breakage", {}).get("count", 0),
+            "merge_plan_status": result["bundle"].get("review", {}).get("merge_plan", {}).get("status", ""),
+            "merge_plan_noop_count": result["bundle"].get("review", {}).get("merge_plan", {}).get("noop_count", 0),
         },
         indent=2,
     )
@@ -181,6 +230,28 @@ def handle_merge(args: argparse.Namespace) -> str:
         },
         indent=2,
     )
+
+
+def handle_rebase(args: argparse.Namespace) -> str:
+    result = rebase_bundle(args.bundle_id, preserve_reviews=args.preserve_reviews)
+    return json.dumps(
+        {
+            "bundle_id": result["bundle"]["bundle_id"],
+            "rebased_from_bundle_id": result["rebased_from_bundle_id"],
+            "transferred_review_count": result["transferred_review_count"],
+            "preserved_review_states": result["preserved_review_states"],
+            "dropped_review_count": result["dropped_review_count"],
+            "dropped_review_states": result["dropped_review_states"],
+            "merge_plan_status": result["bundle"].get("review", {}).get("merge_plan", {}).get("status", ""),
+            "merge_plan_noop_count": result["bundle"].get("review", {}).get("merge_plan", {}).get("noop_count", 0),
+        },
+        indent=2,
+    )
+
+
+def handle_rebase_preview(args: argparse.Namespace) -> str:
+    result = preview_rebase_bundle(args.bundle_id, preserve_reviews=args.preserve_reviews)
+    return json.dumps(result["preview"], indent=2)
 
 
 if __name__ == "__main__":  # pragma: no cover

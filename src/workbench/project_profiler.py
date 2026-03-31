@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path
 import re
 
+from .orm_scanner import collect_relationship_targets as collect_orm_relationship_targets
+from .orm_scanner import collect_sqlalchemy_table_relations, merge_relationship_targets, scan_orm_structure_hints
 from .profile import build_asset_descriptor, profile_asset
+from .sql_scanner import scan_sql_structure_hints
 
 
 IGNORED_PARTS = {".git", ".venv", "__pycache__", "runtime", ".pytest_cache"}
@@ -74,6 +78,7 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
 
     data_assets = summarize_data_assets(root_dir, data_files)
     code_hints = summarize_code_hints(root_dir, code_files)
+    planning_hints = summarize_planning_hints(root_dir)
 
     return {
         "root": str(root_dir),
@@ -87,6 +92,9 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
             "ui_contract_hints": len(code_hints["ui_contract_hints"]),
             "sql_structure_hints": len(code_hints["sql_structure_hints"]),
             "orm_structure_hints": len(code_hints["orm_structure_hints"]),
+            "planning_api_hints": len(planning_hints["planning_api_hints"]),
+            "planning_data_hints": len(planning_hints["planning_data_hints"]),
+            "planning_compute_hints": len(planning_hints["planning_compute_hints"]),
         },
         "manifests": manifests,
         "code_files_sample": code_files[:12],
@@ -96,6 +104,9 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
         "ui_contract_hints": code_hints["ui_contract_hints"][:20],
         "sql_structure_hints": code_hints["sql_structure_hints"][:20],
         "orm_structure_hints": code_hints["orm_structure_hints"][:20],
+        "planning_api_hints": planning_hints["planning_api_hints"][:20],
+        "planning_data_hints": planning_hints["planning_data_hints"][:20],
+        "planning_compute_hints": planning_hints["planning_compute_hints"][:20],
     }
 
 
@@ -136,16 +147,193 @@ def summarize_code_hints(root_dir: Path, code_files: list[str]) -> dict[str, lis
         api_hints.extend(extract_api_contract_hints(relative_path, text, python_context=python_context))
         ui_hints.extend(extract_ui_contract_hints(relative_path, text))
         if relative_path.endswith(".py"):
-            orm_hints.extend(extract_orm_structure_hints(relative_path, text))
+            orm_hints.extend(
+                extract_orm_structure_hints(
+                    relative_path,
+                    text,
+                    python_context=python_context.get(relative_path, {}),
+                )
+            )
         if relative_path.endswith(".sql"):
             sql_hints.extend(extract_sql_structure_hints(relative_path, text))
 
+    sql_hints, orm_hints = enrich_sql_orm_hint_evidence(sql_hints, orm_hints)
     return {
         "api_contract_hints": dedupe_hint_list(api_hints, keys=("method", "route", "file")),
         "ui_contract_hints": dedupe_hint_list(ui_hints, keys=("component", "file")),
         "sql_structure_hints": dedupe_hint_list(sql_hints, keys=("relation", "object_type", "file")),
         "orm_structure_hints": dedupe_hint_list(orm_hints, keys=("relation", "object_type", "file")),
     }
+
+
+def summarize_planning_hints(root_dir: Path) -> dict[str, list[dict]]:
+    from .structure_memory import collect_document_candidates, combine_partial_graph_candidates, extract_sql_relation_tag
+
+    doc_candidates = collect_document_candidates(root_dir, [])
+    api_hints: list[dict] = []
+    data_hints: list[dict] = []
+    compute_hints: list[dict] = []
+
+    for candidate in doc_candidates:
+        if candidate.get("type") != "api_route":
+            continue
+        route = candidate.get("route", "")
+        if not route:
+            continue
+        fields = candidate.get("fields", []) or []
+        api_hints.append(
+            {
+                "id": build_hint_id("plan-api", candidate.get("path", ""), route),
+                "label": candidate.get("label", route),
+                "route": route,
+                "file": candidate.get("path", ""),
+                "detected_from": candidate.get("source", "doc_spec"),
+                "response_fields": list(fields),
+                "required_fields": list(fields),
+                "response_field_sources": [],
+            }
+        )
+
+    partial_candidates = [candidate for candidate in doc_candidates if candidate.get("type") == "partial_graph"]
+    if partial_candidates:
+        plan_graph = combine_partial_graph_candidates(partial_candidates)
+        for node in plan_graph.get("nodes", []):
+            if node.get("removed"):
+                continue
+            if node["kind"] == "contract" and node.get("extension_type") == "api":
+                route = node.get("contract", {}).get("route", "")
+                if not route:
+                    continue
+                fields = [field for field in node.get("contract", {}).get("fields", []) if not field.get("removed")]
+                api_hints.append(
+                    {
+                        "id": node["id"],
+                        "label": node.get("label", route),
+                        "route": route,
+                        "file": "",
+                        "detected_from": "plan_structure",
+                        "response_fields": [field.get("name", "") for field in fields if field.get("name")],
+                        "required_fields": [field.get("name", "") for field in fields if field.get("name") and field.get("required", True)],
+                        "response_field_sources": [
+                            {
+                                "name": field.get("name", ""),
+                                "source_fields": [
+                                    {
+                                        "node_id": source.get("node_id", ""),
+                                        "relation": extract_sql_relation_tag(
+                                            next(
+                                                (candidate_node for candidate_node in plan_graph.get("nodes", []) if candidate_node["id"] == source.get("node_id", "")),
+                                                {},
+                                            )
+                                        ),
+                                        "column": source.get("column", ""),
+                                        "field": source.get("field", ""),
+                                    }
+                                    for source in field.get("sources", [])
+                                ],
+                            }
+                            for field in fields
+                            if field.get("name")
+                        ],
+                    }
+                )
+                continue
+            if node["kind"] == "data":
+                relation = extract_sql_relation_tag(node)
+                if not relation:
+                    continue
+                data_hints.append(
+                    {
+                        "id": node["id"],
+                        "label": node.get("label", relation),
+                        "relation": relation,
+                        "object_type": node.get("extension_type", "table"),
+                        "detected_from": "plan_structure",
+                        "fields": [
+                            {
+                                "name": column.get("name", ""),
+                                "data_type": column.get("data_type", "unknown"),
+                                "required": column.get("required", True),
+                                "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
+                            }
+                            for column in node.get("columns", [])
+                            if column.get("name") and not column.get("removed")
+                        ],
+                    }
+                )
+                continue
+            if node["kind"] != "compute":
+                continue
+            relation = extract_sql_relation_tag(node) or node.get("label", node["id"])
+            compute_hints.append(
+                {
+                    "id": node["id"],
+                    "label": node.get("label", relation),
+                    "relation": relation,
+                    "extension_type": node.get("extension_type", ""),
+                    "detected_from": "plan_structure",
+                    "inputs": list(node.get("compute", {}).get("inputs", [])),
+                    "outputs": list(node.get("compute", {}).get("outputs", [])),
+                    "fields": [
+                        {
+                            "name": column.get("name", ""),
+                            "data_type": column.get("data_type", "unknown"),
+                            "required": column.get("required", True),
+                            "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
+                        }
+                        for column in node.get("columns", [])
+                        if column.get("name") and not column.get("removed")
+                    ],
+                }
+            )
+
+    return {
+        "planning_api_hints": dedupe_hint_list(api_hints, keys=("route", "detected_from")),
+        "planning_data_hints": dedupe_hint_list(data_hints, keys=("relation", "object_type")),
+        "planning_compute_hints": dedupe_hint_list(compute_hints, keys=("relation", "extension_type")),
+    }
+
+
+def resolve_plan_source_fields(plan_graph: dict[str, Any], lineage_inputs: list[dict]) -> list[dict]:
+    source_fields: list[dict] = []
+    field_lookup: dict[str, tuple[str, str]] = {}
+    for node in plan_graph.get("nodes", []):
+        for column in node.get("columns", []):
+            if column.get("id"):
+                field_lookup[column["id"]] = (node["id"], column.get("name", ""))
+        for field in node.get("contract", {}).get("fields", []):
+            if field.get("id"):
+                field_lookup[field["id"]] = (node["id"], field.get("name", ""))
+
+    for lineage in lineage_inputs or []:
+        field_ref = lineage.get("field_id", "") if isinstance(lineage, dict) else str(lineage or "")
+        if not field_ref:
+            continue
+        node_id = ""
+        field_name = ""
+        if field_ref in field_lookup:
+            node_id, field_name = field_lookup[field_ref]
+        elif "." in field_ref:
+            node_id, field_name = field_ref.rsplit(".", 1)
+        if not node_id or not field_name:
+            continue
+        source_node = next((candidate for candidate in plan_graph.get("nodes", []) if candidate["id"] == node_id), {})
+        source_fields.append(
+            {
+                "node_id": node_id,
+                "relation": extract_sql_relation_from_node(source_node),
+                "column": field_name if source_node.get("kind") != "contract" else "",
+                "field": field_name if source_node.get("kind") == "contract" else "",
+            }
+        )
+    return source_fields
+
+
+def extract_sql_relation_from_node(node: dict) -> str:
+    for tag in node.get("tags", []) or []:
+        if tag.startswith("sql_relation:"):
+            return tag.split(":", 1)[1]
+    return ""
 
 
 def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
@@ -170,6 +358,54 @@ def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
     return sorted(direct_entries + grouped_entries, key=lambda item: item["path"] or "")
 
 
+def enrich_sql_orm_hint_evidence(
+    sql_hints: list[dict[str, Any]],
+    orm_hints: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    supported_object_types = {"table", "view", "materialized_view"}
+    sql_by_relation = {
+        hint.get("relation", ""): hint
+        for hint in sql_hints
+        if hint.get("relation") and hint.get("object_type") in supported_object_types
+    }
+    orm_by_relation = {
+        hint.get("relation", ""): hint
+        for hint in orm_hints
+        if hint.get("relation") and hint.get("object_type") in supported_object_types
+    }
+
+    for relation in sorted(set(sql_by_relation) & set(orm_by_relation)):
+        sql_hint = sql_by_relation[relation]
+        orm_hint = orm_by_relation[relation]
+        shared_fields = {
+            field.get("name", "")
+            for field in sql_hint.get("fields", [])
+            if field.get("name")
+        } & {
+            field.get("name", "")
+            for field in orm_hint.get("fields", [])
+            if field.get("name")
+        }
+        if not shared_fields:
+            continue
+        append_hint_evidence_entry(sql_hint, "schema_match")
+        append_hint_evidence_entry(orm_hint, "schema_match")
+        for field in sql_hint.get("fields", []):
+            if field.get("name", "") in shared_fields:
+                append_hint_evidence_entry(field, "schema_match")
+        for field in orm_hint.get("fields", []):
+            if field.get("name", "") in shared_fields:
+                append_hint_evidence_entry(field, "schema_match")
+
+    return sql_hints, orm_hints
+
+
+def append_hint_evidence_entry(item: dict[str, Any], evidence: str) -> None:
+    if not evidence:
+        return
+    item["evidence"] = sorted(dict.fromkeys([*(item.get("evidence", []) or []), evidence]))
+
+
 def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str, dict[str, Any]]:
     python_files = sorted(relative_path for relative_path in code_files if relative_path.endswith(".py"))
     module_infos: dict[str, dict[str, Any]] = {}
@@ -186,7 +422,8 @@ def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str
             "module_name": module_name,
             "tree": tree,
             "class_relations": collect_sqlalchemy_class_relations(tree),
-            "model_fields": collect_pydantic_model_fields(tree),
+            "table_relations": collect_sqlalchemy_table_relations(tree),
+            "model_fields": collect_constructor_model_fields(tree),
             "imports": collect_python_import_bindings(tree, module_name),
         }
 
@@ -194,6 +431,12 @@ def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str
         relative_path: {
             "module_name": info["module_name"],
             "class_relations": dict(info["class_relations"]),
+            "table_relations": dict(info["table_relations"]),
+            "relationship_targets": collect_orm_relationship_targets(
+                info["tree"],
+                class_relations=info["class_relations"],
+                table_relations=info["table_relations"],
+            ),
             "helper_relation_templates": {},
             "helper_templates": {},
             "object_templates": {},
@@ -209,6 +452,15 @@ def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str
             imported_context = build_imported_python_context(info, contexts)
             class_relations = dict(info["class_relations"])
             class_relations.update(imported_context["class_relations"])
+            table_relations = imported_context["table_relations"] | dict(info["table_relations"])
+            relationship_targets = merge_relationship_targets(
+                imported_context["relationship_targets"],
+                collect_orm_relationship_targets(
+                    info["tree"],
+                    class_relations=class_relations,
+                    table_relations=table_relations,
+                ),
+            )
             helper_relation_templates = build_python_helper_relation_templates(
                 info["tree"],
                 class_relations,
@@ -235,7 +487,7 @@ def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str
                 class_relations,
                 info["model_fields"],
                 helper_relation_templates,
-                object_templates,
+                imported_context["object_templates"] | object_templates,
                 initial_templates=imported_context["helper_templates"],
             )
             object_templates = build_python_object_templates(
@@ -245,9 +497,14 @@ def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str
                 helper_templates,
                 imported_context["object_templates"] | object_templates,
             )
+            helper_relation_templates = imported_context["helper_relation_templates"] | helper_relation_templates
+            helper_templates = imported_context["helper_templates"] | helper_templates
+            object_templates = imported_context["object_templates"] | object_templates
             next_context = {
                 "module_name": info["module_name"],
                 "class_relations": class_relations,
+                "table_relations": table_relations,
+                "relationship_targets": relationship_targets,
                 "helper_relation_templates": helper_relation_templates,
                 "helper_templates": helper_templates,
                 "object_templates": object_templates,
@@ -316,6 +573,8 @@ def build_imported_python_context(
 ) -> dict[str, dict[str, Any]]:
     imported = {
         "class_relations": {},
+        "table_relations": {},
+        "relationship_targets": {},
         "helper_relation_templates": {},
         "helper_templates": {},
         "object_templates": {},
@@ -329,16 +588,139 @@ def build_imported_python_context(
         relation = context.get("class_relations", {}).get(symbol_name)
         if relation:
             imported["class_relations"][alias_name] = relation
+            imported["relationship_targets"] = merge_relationship_targets(
+                imported["relationship_targets"],
+                context.get("relationship_targets", {}),
+            )
+        table_relation = context.get("table_relations", {}).get(symbol_name)
+        if table_relation:
+            imported["table_relations"][alias_name] = table_relation
         helper_relation_template = context.get("helper_relation_templates", {}).get(symbol_name)
         if helper_relation_template:
             imported["helper_relation_templates"][alias_name] = helper_relation_template
         helper_template = context.get("helper_templates", {}).get(symbol_name)
         if helper_template:
             imported["helper_templates"][alias_name] = helper_template
+            extend_imported_object_templates(imported, context)
+            extend_imported_helper_return_object_context(imported, helper_template, context)
         object_template = context.get("object_templates", {}).get(symbol_name)
         if object_template:
             imported["object_templates"][alias_name] = object_template
+            extend_imported_object_templates(imported, context)
+        if relation or table_relation or helper_relation_template or helper_template or object_template:
+            continue
+        submodule_context = find_context_by_module_name(contexts, f"{target.get('module', '')}.{symbol_name}")
+        if not submodule_context:
+            continue
+        extend_imported_module_alias_context(imported, alias_name, submodule_context)
+    for alias_name, target_module in (imports.get("module_aliases", {}) or {}).items():
+        context = find_context_by_module_name(contexts, target_module)
+        if not context:
+            continue
+        extend_imported_module_alias_context(imported, alias_name, context)
     return imported
+
+
+def extend_imported_module_alias_context(
+    imported: dict[str, dict[str, Any]],
+    alias_name: str,
+    context: dict[str, Any],
+) -> None:
+    for symbol_name, relation in (context.get("class_relations", {}) or {}).items():
+        if "." in symbol_name:
+            continue
+        imported["class_relations"][f"{alias_name}.{symbol_name}"] = relation
+    for symbol_name, relation in (context.get("table_relations", {}) or {}).items():
+        if "." in symbol_name:
+            continue
+        imported["table_relations"][f"{alias_name}.{symbol_name}"] = relation
+    imported["relationship_targets"] = merge_relationship_targets(
+        imported["relationship_targets"],
+        context.get("relationship_targets", {}),
+    )
+    for symbol_name, template in (context.get("helper_relation_templates", {}) or {}).items():
+        if "." in symbol_name:
+            continue
+        imported["helper_relation_templates"][f"{alias_name}.{symbol_name}"] = template
+    for symbol_name, template in (context.get("helper_templates", {}) or {}).items():
+        if "." in symbol_name:
+            continue
+        imported["helper_templates"][f"{alias_name}.{symbol_name}"] = qualify_helper_template_for_module_alias(
+            template,
+            alias_name,
+            context,
+        )
+    for symbol_name, template in (context.get("object_templates", {}) or {}).items():
+        if "." in symbol_name:
+            continue
+        imported["object_templates"][f"{alias_name}.{symbol_name}"] = template
+
+
+def extend_imported_object_templates(
+    imported: dict[str, dict[str, Any]],
+    context: dict[str, Any],
+) -> None:
+    for symbol_name, template in (context.get("object_templates", {}) or {}).items():
+        if symbol_name not in imported["object_templates"]:
+            imported["object_templates"][symbol_name] = template
+
+
+def qualify_helper_template_for_module_alias(
+    template: dict[str, Any],
+    alias_name: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    qualified = deepcopy(template)
+    qualify_object_state_for_module_alias(
+        qualified.get("return_object", {}),
+        alias_name,
+        context,
+    )
+    return qualified
+
+
+def extend_imported_helper_return_object_context(
+    imported: dict[str, dict[str, Any]],
+    helper_template: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    extend_imported_object_state_context(
+        imported,
+        helper_template.get("return_object", {}),
+        context,
+    )
+
+
+def qualify_object_state_for_module_alias(
+    object_state: dict[str, Any],
+    alias_name: str,
+    context: dict[str, Any],
+) -> None:
+    if not object_state:
+        return
+    class_name = object_state.get("class_name", "")
+    if class_name and "." not in class_name and class_name in (context.get("object_templates", {}) or {}):
+        object_state["class_name"] = f"{alias_name}.{class_name}"
+    for nested_state in (object_state.get("object_bindings", {}) or {}).values():
+        if isinstance(nested_state, dict):
+            qualify_object_state_for_module_alias(nested_state, alias_name, context)
+
+
+def extend_imported_object_state_context(
+    imported: dict[str, dict[str, Any]],
+    object_state: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    if not object_state:
+        return
+    class_name = object_state.get("class_name", "")
+    if class_name and "." not in class_name:
+        object_template = (context.get("object_templates", {}) or {}).get(class_name)
+        if object_template and class_name not in imported["object_templates"]:
+            imported["object_templates"][class_name] = object_template
+    for nested_state in (object_state.get("object_bindings", {}) or {}).values():
+        if isinstance(nested_state, dict):
+            extend_imported_object_state_context(imported, nested_state, context)
 
 
 def extract_api_contract_hints(
@@ -403,132 +785,23 @@ def extract_ui_contract_hints(relative_path: str, text: str) -> list[dict]:
 
 
 def extract_sql_structure_hints(relative_path: str, text: str) -> list[dict]:
-    hints: list[dict] = []
-
-    for match in SQL_CREATE_TABLE_RE.finditer(text):
-        relation = match.group("name")
-        fields = parse_sql_table_columns(match.group("body") or "")
-        hints.append(
-            {
-                "id": build_hint_id("sql", relative_path, relation),
-                "label": relation,
-                "relation": relation,
-                "object_type": "table",
-                "file": relative_path,
-                "detected_from": "sql_create_table",
-                "description": f"Detected from {relative_path}",
-                "fields": fields,
-                "upstream_relations": [],
-            }
-        )
-
-    for match in SQL_CREATE_VIEW_RE.finditer(text):
-        relation = match.group("name")
-        object_type = "materialized_view" if "materialized" in (match.group("kind") or "").lower() else "view"
-        select_sql = match.group("select") or ""
-        fields, upstream_relations = parse_sql_select_projection(select_sql)
-        hints.append(
-            {
-                "id": build_hint_id("sql", relative_path, relation),
-                "label": relation,
-                "relation": relation,
-                "object_type": object_type,
-                "file": relative_path,
-                "detected_from": "sql_create_view",
-                "description": f"Detected from {relative_path}",
-                "fields": fields,
-                "upstream_relations": upstream_relations,
-            }
-        )
-    return hints
+    return scan_sql_structure_hints(relative_path, text)
 
 
-def extract_orm_structure_hints(relative_path: str, text: str) -> list[dict]:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return []
-
-    class_relations = collect_sqlalchemy_class_relations(tree)
-    hints: list[dict] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        seeded_relation = class_relations.get(node.name, "")
-        if "." in seeded_relation:
-            schema_name, relation_name = seeded_relation.rsplit(".", 1)
-        else:
-            schema_name, relation_name = "", seeded_relation
-        fields: list[dict] = []
-        upstream_relations: set[str] = set()
-        for statement in node.body:
-            if isinstance(statement, ast.Assign):
-                target_names = [target.id for target in statement.targets if isinstance(target, ast.Name)]
-                if "__tablename__" in target_names and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-                    relation_name = statement.value.value
-                    continue
-                if "__table_args__" in target_names:
-                    schema_name = extract_sqlalchemy_schema(statement.value)
-                    continue
-                field_name = target_names[0] if target_names else ""
-                relationship_relation = extract_sqlalchemy_relationship_relation(
-                    statement.value,
-                    class_relations=class_relations,
-                    schema_name=schema_name,
-                )
-                if relationship_relation:
-                    upstream_relations.add(relationship_relation)
-                    continue
-                field_hint = extract_sqlalchemy_field_hint(field_name, statement.value, schema_name=schema_name)
-                if field_hint:
-                    fields.append(field_hint)
-                    for source_field in field_hint.get("source_fields", []) or []:
-                        if source_field.get("relation"):
-                            upstream_relations.add(source_field["relation"])
-            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
-                if statement.target.id == "__tablename__" and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-                    relation_name = statement.value.value
-                    continue
-                if statement.target.id == "__table_args__":
-                    schema_name = extract_sqlalchemy_schema(statement.value)
-                    continue
-                relationship_relation = extract_sqlalchemy_relationship_relation(
-                    statement.value,
-                    class_relations=class_relations,
-                    schema_name=schema_name,
-                )
-                if relationship_relation:
-                    upstream_relations.add(relationship_relation)
-                    continue
-                field_hint = extract_sqlalchemy_field_hint(
-                    statement.target.id,
-                    statement.value,
-                    annotation=statement.annotation,
-                    schema_name=schema_name,
-                )
-                if field_hint:
-                    fields.append(field_hint)
-                    for source_field in field_hint.get("source_fields", []) or []:
-                        if source_field.get("relation"):
-                            upstream_relations.add(source_field["relation"])
-
-        if not relation_name:
-            continue
-        qualified_relation = f"{schema_name}.{relation_name}" if schema_name else relation_name
-        hints.append(
-            {
-                "id": build_hint_id("orm", relative_path, qualified_relation),
-                "label": qualified_relation,
-                "relation": qualified_relation,
-                "object_type": "table",
-                "file": relative_path,
-                "detected_from": "sqlalchemy_model",
-                "description": f"Detected from {relative_path}",
-                "fields": fields,
-                "upstream_relations": sorted(upstream_relations),
-            }
-        )
-    return hints
+def extract_orm_structure_hints(
+    relative_path: str,
+    text: str,
+    *,
+    python_context: dict[str, Any] | None = None,
+) -> list[dict]:
+    python_context = python_context or {}
+    return scan_orm_structure_hints(
+        relative_path,
+        text,
+        imported_class_relations=python_context.get("class_relations", {}),
+        imported_table_relations=python_context.get("table_relations", {}),
+        imported_relationship_targets=python_context.get("relationship_targets", {}),
+    )
 
 
 def collect_sqlalchemy_class_relations(tree: ast.AST) -> dict[str, str]:
@@ -788,20 +1061,17 @@ def extract_api_contract_hints_from_python(
         return []
 
     module_context = (python_context or {}).get(relative_path, {})
-    model_fields = collect_pydantic_model_fields(tree)
+    imported_context = (
+        build_imported_python_context(module_context, python_context or {})
+        if module_context and python_context
+        else {"class_relations": {}, "helper_relation_templates": {}, "helper_templates": {}, "object_templates": {}}
+    )
+    model_fields = collect_constructor_model_fields(tree)
     class_relations = dict(collect_sqlalchemy_class_relations(tree))
-    class_relations.update(module_context.get("class_relations", {}))
-    imported_helper_relations = {
-        name: template
-        for name, template in (module_context.get("helper_relation_templates", {}) or {}).items()
-        if name not in collect_sqlalchemy_class_relations(tree)
-    }
-    imported_helper_templates = {
-        name: template
-        for name, template in (module_context.get("helper_templates", {}) or {}).items()
-        if name not in model_fields
-    }
-    imported_object_templates = dict(module_context.get("object_templates", {}) or {})
+    class_relations.update(imported_context.get("class_relations", {}))
+    imported_helper_relations = dict(imported_context.get("helper_relation_templates", {}) or {})
+    imported_helper_templates = dict(imported_context.get("helper_templates", {}) or {})
+    imported_object_templates = dict(imported_context.get("object_templates", {}) or {})
     helper_relation_templates = build_python_helper_relation_templates(
         tree,
         class_relations,
@@ -828,7 +1098,7 @@ def extract_api_contract_hints_from_python(
         class_relations,
         model_fields,
         helper_relation_templates,
-        object_templates,
+        imported_object_templates | object_templates,
         initial_templates=imported_helper_templates,
     )
     object_templates = build_python_object_templates(
@@ -838,6 +1108,9 @@ def extract_api_contract_hints_from_python(
         helper_templates,
         imported_object_templates | object_templates,
     )
+    helper_relation_templates = imported_helper_relations | helper_relation_templates
+    helper_templates = imported_helper_templates | helper_templates
+    object_templates = imported_object_templates | object_templates
     hints: list[dict] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -859,17 +1132,29 @@ def extract_api_contract_hints_from_python(
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
         )
+        dependency_instances = collect_dependency_object_assignments(
+            node,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+        )
         object_instances = collect_local_object_assignments(
             node,
             variable_relations,
+            class_relations,
             variable_sources,
             helper_templates,
             helper_relation_templates,
             object_templates,
+            initial_assignments=dependency_instances,
         )
         assigned_dicts = collect_local_dict_assignments(
             node,
             variable_relations,
+            class_relations,
             variable_sources,
             helper_templates,
             helper_relation_templates=helper_relation_templates,
@@ -880,6 +1165,7 @@ def extract_api_contract_hints_from_python(
             node,
             assigned_dicts,
             variable_relations,
+            class_relations,
             variable_sources,
             helper_templates,
             helper_relation_templates=helper_relation_templates,
@@ -953,24 +1239,37 @@ def build_python_helper_templates(
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
         )
+        dependency_instances = collect_dependency_object_assignments(
+            node,
+            variable_relations,
+            class_relations,
+            {},
+            templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+        )
         variable_sources = collect_local_source_assignments(
             node,
             variable_relations,
             templates,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
+            object_instances=dependency_instances,
         )
         object_instances = collect_local_object_assignments(
             node,
             variable_relations,
+            class_relations,
             variable_sources,
             templates,
             helper_relation_templates,
             object_templates,
+            initial_assignments=dependency_instances,
         )
         assigned_dicts = collect_local_dict_assignments(
             node,
             variable_relations,
+            class_relations,
             variable_sources,
             templates,
             helper_relation_templates=helper_relation_templates,
@@ -981,17 +1280,34 @@ def build_python_helper_templates(
             node,
             assigned_dicts,
             variable_relations,
+            class_relations,
             variable_sources,
             templates,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
             object_instances=object_instances,
         )
-        if return_fields:
-            templates[node.name] = {
+        return_object = collect_return_object_state(
+            node,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if return_fields or return_object:
+            template = {
                 "params": parameters,
                 "return_fields": return_fields,
             }
+            passthrough_params = collect_passthrough_payload_parameters(node, parameters)
+            if passthrough_params:
+                template["passthrough_payload_params"] = passthrough_params
+            if return_object:
+                template["return_object"] = return_object
+            templates[node.name] = template
     return templates
 
 
@@ -1023,12 +1339,22 @@ def build_python_helper_relation_templates(
                 helper_relation_templates=templates,
                 object_templates=object_templates,
             )
+            dependency_instances = collect_dependency_object_assignments(
+                node,
+                variable_relations,
+                class_relations,
+                {},
+                {},
+                helper_relation_templates=templates,
+                object_templates=object_templates,
+            )
             return_relation = collect_return_relation(
                 node,
                 variable_relations,
                 class_relations,
                 helper_relation_templates=templates,
                 object_templates=object_templates,
+                object_instances=dependency_instances,
             )
             if not return_relation:
                 continue
@@ -1089,6 +1415,11 @@ def build_python_object_templates(
                 "class_name": class_node.name,
                 "relation_bindings": dict(attribute_bindings),
                 "source_bindings": {},
+                "object_bindings": {
+                    attr_name: {"param_object": placeholder.split(":", 1)[1]}
+                    for attr_name, placeholder in attribute_bindings.items()
+                    if placeholder.startswith("param:")
+                },
             }
             variable_relations = collect_function_relation_bindings(
                 statement,
@@ -1098,25 +1429,38 @@ def build_python_object_templates(
                 object_templates=template_context,
                 object_instances={"self": self_instance},
             )
-            variable_sources = collect_local_source_assignments(
+            dependency_instances = collect_dependency_object_assignments(
                 statement,
                 variable_relations,
+                class_relations,
+                {},
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
                 object_templates=template_context,
             )
+            variable_sources = collect_local_source_assignments(
+                statement,
+                variable_relations,
+                helper_templates,
+                initial_assignments=self_instance.get("source_bindings", {}),
+                helper_relation_templates=helper_relation_templates,
+                object_templates=template_context,
+                object_instances={"self": self_instance} | dependency_instances,
+            )
             object_instances = collect_local_object_assignments(
                 statement,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates,
                 template_context,
-                initial_assignments={"self": self_instance},
+                initial_assignments={"self": self_instance} | dependency_instances,
             )
             assigned_dicts = collect_local_dict_assignments(
                 statement,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1127,6 +1471,7 @@ def build_python_object_templates(
                 statement,
                 assigned_dicts,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1141,21 +1486,24 @@ def build_python_object_templates(
                 object_templates=template_context,
                 object_instances=object_instances,
             )
-            if return_fields or return_relation:
-                methods[statement.name] = {
-                    "params": method_params,
-                    "return_fields": return_fields,
-                    "return_relation": return_relation,
-                }
+            methods[statement.name] = {
+                "params": method_params,
+                "return_fields": return_fields,
+                "return_relation": return_relation,
+                "body_node": statement,
+            }
+            passthrough_params = collect_passthrough_payload_parameters(statement, method_params)
+            if passthrough_params:
+                methods[statement.name]["passthrough_payload_params"] = passthrough_params
         if attribute_bindings or methods:
             templates[class_node.name] = current_class_template
     return templates
 
 
-def collect_pydantic_model_fields(tree: ast.AST) -> dict[str, list[str]]:
+def collect_constructor_model_fields(tree: ast.AST) -> dict[str, list[str]]:
     models: dict[str, list[str]] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or not class_looks_like_pydantic_model(node):
+        if not isinstance(node, ast.ClassDef) or not class_looks_like_constructor_model(node):
             continue
         field_names: list[str] = []
         for statement in node.body:
@@ -1170,10 +1518,14 @@ def collect_pydantic_model_fields(tree: ast.AST) -> dict[str, list[str]]:
     return models
 
 
-def class_looks_like_pydantic_model(node: ast.ClassDef) -> bool:
+def class_looks_like_constructor_model(node: ast.ClassDef) -> bool:
     for base in node.bases:
         name = get_ast_name(base)
         if name.split(".")[-1] == "BaseModel":
+            return True
+    for decorator in node.decorator_list:
+        name = get_ast_name(decorator)
+        if name.split(".")[-1] == "dataclass":
             return True
     return False
 
@@ -1242,6 +1594,13 @@ def extract_target_names(node: ast.AST | None) -> list[str]:
             names.extend(extract_target_names(element))
         return names
     return []
+
+
+def unwrap_await(node: ast.AST | None) -> ast.AST | None:
+    current = node
+    while isinstance(current, ast.Await):
+        current = current.value
+    return current
 
 
 def extend_relations_for_comprehensions(
@@ -1371,11 +1730,15 @@ def collect_local_source_assignments(
     variable_relations: dict[str, str],
     helper_templates: dict[str, dict[str, Any]],
     *,
+    initial_assignments: dict[str, list[dict[str, str]]] | None = None,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
-    assignments: dict[str, list[dict[str, str]]] = {}
+    assignments: dict[str, list[dict[str, str]]] = {
+        name: [dict(source) for source in source_fields]
+        for name, source_fields in (initial_assignments or {}).items()
+    }
     for node in iter_ordered_statement_nodes(function_node, root=function_node):
         if isinstance(node, ast.Assign):
             source_fields = extract_source_fields_from_expression(
@@ -1410,6 +1773,7 @@ def collect_local_source_assignments(
 def collect_local_object_assignments(
     function_node: ast.FunctionDef | ast.AsyncFunctionDef,
     variable_relations: dict[str, str],
+    class_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     helper_relation_templates: dict[str, dict[str, Any]],
@@ -1423,6 +1787,7 @@ def collect_local_object_assignments(
             instance_state = build_object_instance_state(
                 node.value,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates,
@@ -1438,6 +1803,7 @@ def collect_local_object_assignments(
             instance_state = build_object_instance_state(
                 node.value,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates,
@@ -1449,23 +1815,141 @@ def collect_local_object_assignments(
     return assignments
 
 
-def collect_local_dict_assignments(
+def collect_dependency_object_assignments(
     function_node: ast.FunctionDef | ast.AsyncFunctionDef,
     variable_relations: dict[str, str],
+    class_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     *,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
     object_templates: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    assignments: dict[str, dict[str, Any]] = {}
+    positional_args = [*function_node.args.posonlyargs, *function_node.args.args]
+    positional_defaults = [None] * (len(positional_args) - len(function_node.args.defaults)) + list(function_node.args.defaults)
+    for argument, default in zip(positional_args, positional_defaults):
+        if argument.arg in {"self", "cls"}:
+            continue
+        dependency_hint = default or extract_depends_annotation(argument.annotation)
+        instance_state = build_dependency_object_instance_state(
+            dependency_hint,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+        )
+        if instance_state:
+            assignments[argument.arg] = instance_state
+    for argument, default in zip(function_node.args.kwonlyargs, function_node.args.kw_defaults):
+        if argument.arg in {"self", "cls"}:
+            continue
+        dependency_hint = default or extract_depends_annotation(argument.annotation)
+        instance_state = build_dependency_object_instance_state(
+            dependency_hint,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+        )
+        if instance_state:
+            assignments[argument.arg] = instance_state
+    return assignments
+
+
+def extract_depends_annotation(node: ast.AST | None) -> ast.AST | None:
+    if node is None:
+        return None
+    if isinstance(node, ast.Call) and get_ast_name(node.func).split(".")[-1] == "Depends":
+        return node
+    if isinstance(node, ast.Subscript):
+        base_name = get_ast_name(node.value).split(".")[-1]
+        if base_name == "Annotated":
+            slice_node = get_subscript_slice(node)
+            for candidate in extract_annotation_elements(slice_node):
+                dependency = extract_depends_annotation(candidate)
+                if dependency is not None:
+                    return dependency
+        return extract_depends_annotation(get_subscript_slice(node))
+    if isinstance(node, ast.Tuple):
+        for element in node.elts:
+            dependency = extract_depends_annotation(element)
+            if dependency is not None:
+                return dependency
+    return None
+
+
+def extract_annotation_elements(node: ast.AST | None) -> list[ast.AST]:
+    if node is None:
+        return []
+    if isinstance(node, ast.Tuple):
+        return list(node.elts)
+    return [node]
+
+
+def build_dependency_object_instance_state(
+    node: ast.AST | None,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    *,
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    call = unwrap_await(node)
+    if not isinstance(call, ast.Call):
+        return {}
+    if get_ast_name(call.func).split(".")[-1] != "Depends":
+        return {}
+    dependency_target: ast.AST | None = None
+    if call.args:
+        dependency_target = call.args[0]
+    else:
+        dependency_keyword = next((item for item in call.keywords if item.arg == "dependency"), None)
+        dependency_target = dependency_keyword.value if dependency_keyword else None
+    if dependency_target is None:
+        return {}
+    dependency_call = ast.Call(func=dependency_target, args=[], keywords=[])
+    return instantiate_helper_object_state(
+        dependency_call,
+        variable_relations=variable_relations,
+        class_relations=class_relations,
+        variable_sources=variable_sources,
+        helper_templates=helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=None,
+    )
+
+
+def collect_local_dict_assignments(
+    function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    *,
+    initial_assignments: dict[str, dict[str, list[dict[str, str]]]] | None = None,
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, list[dict[str, str]]]]:
-    assignments: dict[str, dict[str, list[dict[str, str]]]] = {}
+    assignments: dict[str, dict[str, list[dict[str, str]]]] = {
+        name: deep_copy_field_mappings(field_mappings)
+        for name, field_mappings in (initial_assignments or {}).items()
+    }
     for node in iter_ordered_statement_nodes(function_node, root=function_node):
         if isinstance(node, ast.Assign):
             field_mappings = extract_response_field_mapping_from_value(
                 node.value,
                 assignments,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1498,6 +1982,7 @@ def collect_local_dict_assignments(
                 node.value,
                 assignments,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1506,6 +1991,66 @@ def collect_local_dict_assignments(
             )
             if field_mappings or is_empty_mapping_expression(node.value):
                 assignments[node.target.id] = deep_copy_field_mappings(field_mappings)
+        elif isinstance(node, ast.Expr):
+            call = unwrap_await(node.value)
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "update"
+                and isinstance(call.func.value, ast.Name)
+            ):
+                dict_name = call.func.value.id
+                field_mappings: dict[str, list[dict[str, str]]] = {}
+                if call.args:
+                    merge_field_mappings(
+                        field_mappings,
+                        extract_response_field_mapping_from_value(
+                            call.args[0],
+                            assignments,
+                            variable_relations,
+                            class_relations,
+                            variable_sources,
+                            helper_templates,
+                            helper_relation_templates=helper_relation_templates,
+                            object_templates=object_templates,
+                            object_instances=object_instances,
+                        ),
+                    )
+                for keyword in call.keywords:
+                    if not keyword.arg:
+                        continue
+                    field_mappings[keyword.arg] = extract_source_fields_from_expression(
+                        keyword.value,
+                        variable_relations,
+                        variable_sources,
+                        helper_templates,
+                        helper_relation_templates=helper_relation_templates,
+                        object_templates=object_templates,
+                        object_instances=object_instances,
+                    )
+                if field_mappings:
+                    assignments.setdefault(dict_name, {})
+                    merge_field_mappings(assignments[dict_name], field_mappings)
+        elif isinstance(node, ast.AugAssign):
+            target = node.target
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(node.op, ast.BitOr)
+            ):
+                field_mappings = extract_response_field_mapping_from_value(
+                    node.value,
+                    assignments,
+                    variable_relations,
+                    class_relations,
+                    variable_sources,
+                    helper_templates,
+                    helper_relation_templates=helper_relation_templates,
+                    object_templates=object_templates,
+                    object_instances=object_instances,
+                )
+                if field_mappings:
+                    assignments.setdefault(target.id, {})
+                    merge_field_mappings(assignments[target.id], field_mappings)
     return assignments
 
 
@@ -1513,6 +2058,7 @@ def collect_return_field_mappings(
     function_node: ast.FunctionDef | ast.AsyncFunctionDef,
     assigned_dicts: dict[str, dict[str, list[dict[str, str]]]],
     variable_relations: dict[str, str],
+    class_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     *,
@@ -1529,6 +2075,7 @@ def collect_return_field_mappings(
                     node.value,
                     assigned_dicts,
                     variable_relations,
+                    class_relations,
                     variable_sources,
                     helper_templates,
                     helper_relation_templates=helper_relation_templates,
@@ -1539,10 +2086,26 @@ def collect_return_field_mappings(
     return fields
 
 
+def collect_passthrough_payload_parameters(
+    function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    parameters: list[str],
+) -> list[str]:
+    passthrough: list[str] = []
+    parameter_set = set(parameters)
+    for node in iter_ordered_statement_nodes(function_node, root=function_node):
+        if not isinstance(node, ast.Return):
+            continue
+        value = unwrap_await(node.value)
+        if isinstance(value, ast.Name) and value.id in parameter_set and value.id not in passthrough:
+            passthrough.append(value.id)
+    return passthrough
+
+
 def extract_response_field_mapping_from_value(
     node: ast.AST | None,
     assigned_dicts: dict[str, dict[str, list[dict[str, str]]]],
     variable_relations: dict[str, str],
+    class_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     *,
@@ -1550,11 +2113,28 @@ def extract_response_field_mapping_from_value(
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
+    node = unwrap_await(node)
     if node is None:
         return {}
     if isinstance(node, ast.Dict):
         field_mappings: dict[str, list[dict[str, str]]] = {}
         for key, value in zip(node.keys, node.values):
+            if key is None:
+                merge_field_mappings(
+                    field_mappings,
+                    extract_response_field_mapping_from_value(
+                        value,
+                        assigned_dicts,
+                        variable_relations,
+                        class_relations,
+                        variable_sources,
+                        helper_templates,
+                        helper_relation_templates=helper_relation_templates,
+                        object_templates=object_templates,
+                        object_instances=object_instances,
+                    ),
+                )
+                continue
             if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
                 continue
             field_mappings[key.value] = extract_source_fields_from_expression(
@@ -1576,6 +2156,7 @@ def extract_response_field_mapping_from_value(
                     element,
                     assigned_dicts,
                     variable_relations,
+                    class_relations,
                     variable_sources,
                     helper_templates,
                     helper_relation_templates=helper_relation_templates,
@@ -1590,6 +2171,7 @@ def extract_response_field_mapping_from_value(
             node.elt,
             assigned_dicts,
             comprehension_relations,
+            class_relations,
             variable_sources,
             helper_templates,
             helper_relation_templates=helper_relation_templates,
@@ -1598,6 +2180,68 @@ def extract_response_field_mapping_from_value(
         )
     if isinstance(node, ast.Name):
         return deep_copy_field_mappings(assigned_dicts.get(node.id, {}))
+    if isinstance(node, ast.IfExp):
+        field_mappings: dict[str, list[dict[str, str]]] = {}
+        merge_field_mappings(
+            field_mappings,
+            extract_response_field_mapping_from_value(
+                node.body,
+                assigned_dicts,
+                variable_relations,
+                class_relations,
+                variable_sources,
+                helper_templates,
+                helper_relation_templates=helper_relation_templates,
+                object_templates=object_templates,
+                object_instances=object_instances,
+            ),
+        )
+        merge_field_mappings(
+            field_mappings,
+            extract_response_field_mapping_from_value(
+                node.orelse,
+                assigned_dicts,
+                variable_relations,
+                class_relations,
+                variable_sources,
+                helper_templates,
+                helper_relation_templates=helper_relation_templates,
+                object_templates=object_templates,
+                object_instances=object_instances,
+            ),
+        )
+        return field_mappings
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        field_mappings: dict[str, list[dict[str, str]]] = {}
+        merge_field_mappings(
+            field_mappings,
+            extract_response_field_mapping_from_value(
+                node.left,
+                assigned_dicts,
+                variable_relations,
+                class_relations,
+                variable_sources,
+                helper_templates,
+                helper_relation_templates=helper_relation_templates,
+                object_templates=object_templates,
+                object_instances=object_instances,
+            ),
+        )
+        merge_field_mappings(
+            field_mappings,
+            extract_response_field_mapping_from_value(
+                node.right,
+                assigned_dicts,
+                variable_relations,
+                class_relations,
+                variable_sources,
+                helper_templates,
+                helper_relation_templates=helper_relation_templates,
+                object_templates=object_templates,
+                object_instances=object_instances,
+            ),
+        )
+        return field_mappings
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Name) and node.func.id == "dict":
             if node.keywords:
@@ -1620,6 +2264,7 @@ def extract_response_field_mapping_from_value(
                     node.args[0],
                     assigned_dicts,
                     variable_relations,
+                    class_relations,
                     variable_sources,
                     helper_templates,
                     helper_relation_templates=helper_relation_templates,
@@ -1631,6 +2276,7 @@ def extract_response_field_mapping_from_value(
                 node.func.value,
                 assigned_dicts,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1642,6 +2288,7 @@ def extract_response_field_mapping_from_value(
             variable_relations=variable_relations,
             variable_sources=variable_sources,
             helper_templates=helper_templates,
+            assigned_dicts=assigned_dicts,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
             object_instances=object_instances,
@@ -1651,8 +2298,10 @@ def extract_response_field_mapping_from_value(
         object_method_mapping = instantiate_object_method_field_mapping(
             node,
             variable_relations=variable_relations,
+            class_relations=class_relations,
             variable_sources=variable_sources,
             helper_templates=helper_templates,
+            assigned_dicts=assigned_dicts,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
             object_instances=object_instances,
@@ -1665,6 +2314,7 @@ def extract_response_field_mapping_from_value(
                     keyword.value,
                     assigned_dicts,
                     variable_relations,
+                    class_relations,
                     variable_sources,
                     helper_templates,
                     helper_relation_templates=helper_relation_templates,
@@ -1676,6 +2326,7 @@ def extract_response_field_mapping_from_value(
                 node.args[0],
                 assigned_dicts,
                 variable_relations,
+                class_relations,
                 variable_sources,
                 helper_templates,
                 helper_relation_templates=helper_relation_templates,
@@ -1691,6 +2342,7 @@ def extract_source_fields_from_expression(
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     *,
+    assigned_dicts: dict[str, dict[str, list[dict[str, str]]]] | None = None,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
@@ -1708,6 +2360,7 @@ def extract_source_fields_from_expression(
         collected.append({"relation": relation, "column": column})
 
     def walk(current: ast.AST | None) -> None:
+        current = unwrap_await(current)
         if current is None:
             return
         if isinstance(current, ast.Name):
@@ -1730,6 +2383,7 @@ def extract_source_fields_from_expression(
                 variable_relations=variable_relations,
                 variable_sources=variable_sources,
                 helper_templates=helper_templates,
+                assigned_dicts=assigned_dicts,
                 helper_relation_templates=helper_relation_templates,
                 object_templates=object_templates,
                 object_instances=object_instances,
@@ -1742,8 +2396,10 @@ def extract_source_fields_from_expression(
             object_method_mapping = instantiate_object_method_field_mapping(
                 current,
                 variable_relations=variable_relations,
+                class_relations={},
                 variable_sources=variable_sources,
                 helper_templates=helper_templates,
+                assigned_dicts=assigned_dicts,
                 helper_relation_templates=helper_relation_templates,
                 object_templates=object_templates,
                 object_instances=object_instances,
@@ -1767,6 +2423,7 @@ def extract_source_fields_from_expression(
                 comprehension_relations,
                 variable_sources,
                 helper_templates,
+                assigned_dicts=assigned_dicts,
                 helper_relation_templates=helper_relation_templates,
                 object_templates=object_templates,
                 object_instances=object_instances,
@@ -1779,6 +2436,7 @@ def extract_source_fields_from_expression(
                         comprehension_relations,
                         variable_sources,
                         helper_templates,
+                        assigned_dicts=assigned_dicts,
                         helper_relation_templates=helper_relation_templates,
                         object_templates=object_templates,
                         object_instances=object_instances,
@@ -1829,18 +2487,21 @@ def instantiate_helper_field_mapping(
     variable_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
+    assigned_dicts: dict[str, dict[str, list[dict[str, str]]]] | None = None,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
-    if not isinstance(node.func, ast.Name):
+    function_name = get_ast_name(node.func)
+    if not function_name:
         return {}
-    helper = helper_templates.get(node.func.id)
+    helper = helper_templates.get(function_name)
     if not helper:
         return {}
     parameter_names = helper.get("params", [])
     relation_bindings: dict[str, str] = {}
     source_bindings: dict[str, list[dict[str, str]]] = {}
+    payload_bindings: dict[str, dict[str, list[dict[str, str]]]] = {}
 
     for index, parameter_name in enumerate(parameter_names):
         argument = None
@@ -1866,13 +2527,104 @@ def instantiate_helper_field_mapping(
             variable_relations,
             variable_sources,
             helper_templates,
+            assigned_dicts=assigned_dicts,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
             object_instances=object_instances,
         )
         if source_fields:
             source_bindings[parameter_name] = [dict(source) for source in source_fields]
-    return resolve_placeholder_field_mappings(helper.get("return_fields", {}), relation_bindings, source_bindings)
+        payload_mapping = extract_response_field_mapping_from_value(
+            argument,
+            assigned_dicts or {},
+            variable_relations,
+            {},
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if payload_mapping:
+            payload_bindings[parameter_name] = payload_mapping
+    resolved = resolve_placeholder_field_mappings(helper.get("return_fields", {}), relation_bindings, source_bindings)
+    for parameter_name in helper.get("passthrough_payload_params", []):
+        merge_field_mappings(resolved, payload_bindings.get(parameter_name, {}))
+    return resolved
+
+
+def instantiate_helper_object_state(
+    node: ast.Call,
+    *,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+    object_instances: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    function_name = get_ast_name(node.func)
+    if not function_name:
+        return {}
+    helper = helper_templates.get(function_name)
+    if not helper:
+        return {}
+    template_state = helper.get("return_object", {})
+    if not template_state:
+        return {}
+    parameter_names = helper.get("params", [])
+    relation_bindings: dict[str, str] = {}
+    source_bindings: dict[str, list[dict[str, str]]] = {}
+    object_param_bindings: dict[str, dict[str, Any]] = {}
+    for index, parameter_name in enumerate(parameter_names):
+        argument = None
+        if index < len(node.args):
+            argument = node.args[index]
+        else:
+            keyword = next((item for item in node.keywords if item.arg == parameter_name), None)
+            argument = keyword.value if keyword else None
+        if argument is None:
+            continue
+        relation = extract_relation_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if relation:
+            relation_bindings[parameter_name] = relation
+        source_fields = extract_source_fields_from_expression(
+            argument,
+            variable_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if source_fields:
+            source_bindings[parameter_name] = [dict(source) for source in source_fields]
+        nested_instance = resolve_object_instance_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if nested_instance:
+            object_param_bindings[parameter_name] = nested_instance
+    return resolve_object_state_template(
+        template_state,
+        relation_bindings,
+        source_bindings,
+        object_param_bindings,
+    )
 
 
 def resolve_attribute_source(node: ast.Attribute, variable_relations: dict[str, str]) -> tuple[str, str]:
@@ -1914,23 +2666,155 @@ def resolve_placeholder_field_mappings(
     return instantiated
 
 
+def resolve_placeholder_relations(
+    template_relations: dict[str, str],
+    relation_bindings: dict[str, str],
+) -> dict[str, str]:
+    instantiated: dict[str, str] = {}
+    for key, relation in template_relations.items():
+        if relation.startswith("param:"):
+            bound_relation = relation_bindings.get(relation.split(":", 1)[1], "")
+            if bound_relation:
+                instantiated[key] = bound_relation
+            continue
+        if relation:
+            instantiated[key] = relation
+    return instantiated
+
+
+def resolve_object_state_template(
+    template_state: dict[str, Any],
+    relation_bindings: dict[str, str],
+    source_bindings: dict[str, list[dict[str, str]]],
+    object_param_bindings: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not template_state:
+        return {}
+    if template_state.get("param_object"):
+        return deepcopy(object_param_bindings.get(template_state["param_object"], {}))
+    resolved = {
+        "class_name": template_state.get("class_name", ""),
+        "relation_bindings": resolve_placeholder_relations(
+            template_state.get("relation_bindings", {}),
+            relation_bindings,
+        ),
+        "source_bindings": resolve_placeholder_field_mappings(
+            template_state.get("source_bindings", {}),
+            relation_bindings,
+            source_bindings,
+        ),
+        "object_bindings": resolve_placeholder_object_bindings(
+            template_state.get("object_bindings", {}),
+            relation_bindings,
+            source_bindings,
+            object_param_bindings,
+        ),
+    }
+    if not resolved["object_bindings"]:
+        resolved.pop("object_bindings")
+    return resolved
+
+
+def resolve_placeholder_object_bindings(
+    template_bindings: dict[str, dict[str, Any]],
+    relation_bindings: dict[str, str],
+    source_bindings: dict[str, list[dict[str, str]]],
+    object_param_bindings: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    instantiated: dict[str, dict[str, Any]] = {}
+    for key, template_state in template_bindings.items():
+        resolved = resolve_object_state_template(
+            template_state,
+            relation_bindings,
+            source_bindings,
+            object_param_bindings,
+        )
+        if resolved:
+            instantiated[key] = resolved
+    return instantiated
+
+
+def resolve_object_instance_from_expression(
+    node: ast.AST | None,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    *,
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+    object_instances: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    node = unwrap_await(node)
+    if node is None:
+        return {}
+    if isinstance(node, ast.Name) and object_instances and node.id in object_instances:
+        return deepcopy(object_instances[node.id])
+    if isinstance(node, ast.Attribute):
+        owner_state = resolve_object_instance_from_expression(
+            node.value,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if owner_state:
+            nested = (owner_state.get("object_bindings", {}) or {}).get(node.attr, {})
+            if nested:
+                return deepcopy(nested)
+        return {}
+    if isinstance(node, ast.Call):
+        return build_object_instance_state(
+            node,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates or {},
+            object_templates or {},
+            object_instances,
+        )
+    return {}
+
+
 def build_object_instance_state(
     node: ast.AST | None,
     variable_relations: dict[str, str],
+    class_relations: dict[str, str],
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
     helper_relation_templates: dict[str, dict[str, Any]],
     object_templates: dict[str, dict[str, Any]],
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+    node = unwrap_await(node)
+    if not isinstance(node, ast.Call):
         return {}
-    class_template = object_templates.get(node.func.id)
+    helper_instance = instantiate_helper_object_state(
+        node,
+        variable_relations=variable_relations,
+        class_relations=class_relations,
+        variable_sources=variable_sources,
+        helper_templates=helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+    )
+    if helper_instance:
+        return helper_instance
+    class_name = get_ast_name(node.func)
+    if not class_name:
+        return {}
+    class_template = object_templates.get(class_name)
     if not class_template:
         return {}
     parameter_names = class_template.get("params", [])
     relation_bindings: dict[str, str] = {}
     source_bindings: dict[str, list[dict[str, str]]] = {}
+    object_bindings: dict[str, dict[str, Any]] = {}
     for attr_name, placeholder in class_template.get("attributes", {}).items():
         if not placeholder.startswith("param:"):
             continue
@@ -1948,7 +2832,7 @@ def build_object_instance_state(
         relation = extract_relation_from_expression(
             argument,
             variable_relations,
-            {},
+            class_relations,
             helper_relation_templates=helper_relation_templates,
             object_templates=object_templates,
             object_instances=object_instances,
@@ -1966,56 +2850,393 @@ def build_object_instance_state(
         )
         if source_fields:
             source_bindings[attr_name] = [dict(source) for source in source_fields]
+        nested_instance = resolve_object_instance_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if nested_instance:
+            object_bindings[attr_name] = nested_instance
+        elif (
+            isinstance(argument, ast.Name)
+            and argument.id not in class_relations
+            and argument.id not in variable_relations
+            and not source_fields
+        ):
+            object_bindings[attr_name] = {"param_object": argument.id}
     return {
-        "class_name": node.func.id,
+        "class_name": class_name,
         "relation_bindings": relation_bindings,
         "source_bindings": source_bindings,
+        "object_bindings": object_bindings,
     }
+
+
+def collect_return_object_state(
+    function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    *,
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+    object_instances: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for node in iter_ordered_statement_nodes(function_node, root=function_node):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        instance_state = resolve_object_instance_from_expression(
+            node.value,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if instance_state:
+            candidates.append(instance_state)
+    if len(candidates) != 1:
+        return {}
+    return deepcopy(candidates[0])
+
+
+def evaluate_bound_object_method(
+    method_template: dict[str, Any],
+    call_node: ast.Call,
+    instance_state: dict[str, Any],
+    *,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+    object_instances: dict[str, dict[str, Any]] | None = None,
+    assigned_dicts: dict[str, dict[str, list[dict[str, str]]]] | None = None,
+) -> tuple[dict[str, list[dict[str, str]]], str]:
+    method_node = method_template.get("body_node")
+    if not isinstance(method_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return {}, ""
+    method_params = method_template.get("params", [])
+    method_relation_bindings: dict[str, str] = {}
+    method_source_bindings: dict[str, list[dict[str, str]]] = {}
+    method_object_bindings: dict[str, dict[str, Any]] = {}
+    method_payload_bindings: dict[str, dict[str, list[dict[str, str]]]] = {}
+    for index, parameter_name in enumerate(method_params):
+        argument = None
+        if index < len(call_node.args):
+            argument = call_node.args[index]
+        else:
+            keyword = next((item for item in call_node.keywords if item.arg == parameter_name), None)
+            argument = keyword.value if keyword else None
+        if argument is None:
+            continue
+        relation = extract_relation_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if relation:
+            method_relation_bindings[parameter_name] = relation
+        source_fields = extract_source_fields_from_expression(
+            argument,
+            variable_relations,
+            variable_sources,
+            helper_templates,
+            assigned_dicts=assigned_dicts,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if source_fields:
+            method_source_bindings[parameter_name] = [dict(source) for source in source_fields]
+        nested_instance = resolve_object_instance_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if nested_instance:
+            method_object_bindings[parameter_name] = nested_instance
+        payload_mapping = extract_response_field_mapping_from_value(
+            argument,
+            assigned_dicts or {},
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if payload_mapping:
+            method_payload_bindings[parameter_name] = payload_mapping
+
+    initial_relations = {
+        f"self.{attr_name}": relation
+        for attr_name, relation in (instance_state.get("relation_bindings", {}) or {}).items()
+    }
+    initial_relations.update({parameter: f"param:{parameter}" for parameter in method_params})
+    initial_relations.update(method_relation_bindings)
+    bound_self = deepcopy(instance_state)
+    nested_object_instances = {"self": bound_self}
+    nested_object_instances.update(method_object_bindings)
+    bound_relations = collect_function_relation_bindings(
+        method_node,
+        class_relations,
+        initial_bindings=initial_relations,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=nested_object_instances,
+    )
+    dependency_instances = collect_dependency_object_assignments(
+        method_node,
+        bound_relations,
+        class_relations,
+        method_source_bindings,
+        helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+    )
+    nested_object_instances.update(dependency_instances)
+    local_sources = collect_local_source_assignments(
+        method_node,
+        bound_relations,
+        helper_templates,
+        initial_assignments=method_source_bindings,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=nested_object_instances,
+    )
+    local_objects = collect_local_object_assignments(
+        method_node,
+        bound_relations,
+        class_relations,
+        local_sources,
+        helper_templates,
+        helper_relation_templates or {},
+        object_templates or {},
+        initial_assignments=nested_object_instances,
+    )
+    assigned_dicts = collect_local_dict_assignments(
+        method_node,
+        bound_relations,
+        class_relations,
+        local_sources,
+        helper_templates,
+        initial_assignments=method_payload_bindings,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=local_objects,
+    )
+    return_fields = collect_return_field_mappings(
+        method_node,
+        assigned_dicts,
+        bound_relations,
+        class_relations,
+        local_sources,
+        helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=local_objects,
+    )
+    for parameter_name in method_template.get("passthrough_payload_params", []):
+        merge_field_mappings(return_fields, method_payload_bindings.get(parameter_name, {}))
+    return_relation = collect_return_relation(
+        method_node,
+        bound_relations,
+        class_relations,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=local_objects,
+    )
+    return return_fields, return_relation
+
+
+def bind_object_method_call_state(
+    method_template: dict[str, Any],
+    call_node: ast.Call,
+    instance_state: dict[str, Any],
+    *,
+    variable_relations: dict[str, str],
+    class_relations: dict[str, str],
+    variable_sources: dict[str, list[dict[str, str]]],
+    helper_templates: dict[str, dict[str, Any]],
+    helper_relation_templates: dict[str, dict[str, Any]] | None = None,
+    object_templates: dict[str, dict[str, Any]] | None = None,
+    object_instances: dict[str, dict[str, Any]] | None = None,
+    assigned_dicts: dict[str, dict[str, list[dict[str, str]]]] | None = None,
+) -> tuple[dict[str, str], dict[str, list[dict[str, str]]], dict[str, dict[str, Any]]]:
+    relation_bindings = dict(instance_state.get("relation_bindings", {}))
+    source_bindings = {
+        name: [dict(source) for source in source_fields]
+        for name, source_fields in (instance_state.get("source_bindings", {}) or {}).items()
+    }
+    object_bindings = {
+        name: deepcopy(state)
+        for name, state in (instance_state.get("object_bindings", {}) or {}).items()
+    }
+    payload_bindings: dict[str, dict[str, list[dict[str, str]]]] = {}
+    for index, parameter_name in enumerate(method_template.get("params", [])):
+        argument = None
+        if index < len(call_node.args):
+            argument = call_node.args[index]
+        else:
+            keyword = next((item for item in call_node.keywords if item.arg == parameter_name), None)
+            argument = keyword.value if keyword else None
+        if argument is None:
+            continue
+        relation = extract_relation_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if relation:
+            relation_bindings[parameter_name] = relation
+        source_fields_for_param = extract_source_fields_from_expression(
+            argument,
+            variable_relations,
+            variable_sources,
+            helper_templates,
+            assigned_dicts=assigned_dicts,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if source_fields_for_param:
+            source_bindings[parameter_name] = [dict(source) for source in source_fields_for_param]
+        nested_instance = resolve_object_instance_from_expression(
+            argument,
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if nested_instance:
+            object_bindings[parameter_name] = nested_instance
+        payload_mapping = extract_response_field_mapping_from_value(
+            argument,
+            assigned_dicts or {},
+            variable_relations,
+            class_relations,
+            variable_sources,
+            helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        if payload_mapping:
+            payload_bindings[parameter_name] = payload_mapping
+    return relation_bindings, source_bindings, object_bindings, payload_bindings
 
 
 def instantiate_object_method_field_mapping(
     node: ast.Call,
     *,
     variable_relations: dict[str, str],
+    class_relations: dict[str, str] | None = None,
     variable_sources: dict[str, list[dict[str, str]]],
     helper_templates: dict[str, dict[str, Any]],
+    assigned_dicts: dict[str, dict[str, list[dict[str, str]]]] | None = None,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     if not isinstance(node.func, ast.Attribute) or not object_templates:
         return {}
-    owner = node.func.value
-    instance_state: dict[str, Any] | None = None
-    if isinstance(owner, ast.Name) and object_instances:
-        instance_state = object_instances.get(owner.id)
-    elif isinstance(owner, ast.Call):
-        instance_state = build_object_instance_state(
-            owner,
-            variable_relations,
-            variable_sources,
-            helper_templates,
-            helper_relation_templates or {},
-            object_templates,
-            object_instances,
-        )
+    instance_state = resolve_object_instance_from_expression(
+        node.func.value,
+        variable_relations,
+        class_relations or {},
+        variable_sources,
+        helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+    )
     if not instance_state:
         return {}
     class_template = object_templates.get(instance_state.get("class_name", ""), {})
     method_template = class_template.get("methods", {}).get(node.func.attr, {})
-    if not method_template.get("return_fields"):
-        return {}
-    return resolve_placeholder_field_mappings(
-        method_template.get("return_fields", {}),
-        instance_state.get("relation_bindings", {}),
-        instance_state.get("source_bindings", {}),
+    if method_template.get("return_fields"):
+        relation_bindings, source_bindings, _, payload_bindings = bind_object_method_call_state(
+            method_template,
+            node,
+            instance_state,
+            variable_relations=variable_relations,
+            class_relations=class_relations or {},
+            variable_sources=variable_sources,
+            helper_templates=helper_templates,
+            assigned_dicts=assigned_dicts,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+        )
+        resolved = resolve_placeholder_field_mappings(
+            method_template.get("return_fields", {}),
+            relation_bindings,
+            source_bindings,
+        )
+        for parameter_name in method_template.get("passthrough_payload_params", []):
+            merge_field_mappings(resolved, payload_bindings.get(parameter_name, {}))
+        runtime_fields, _ = evaluate_bound_object_method(
+            method_template,
+            node,
+            instance_state,
+            variable_relations=variable_relations,
+            class_relations=class_relations or {},
+            variable_sources=variable_sources,
+            helper_templates=helper_templates,
+            helper_relation_templates=helper_relation_templates,
+            object_templates=object_templates,
+            object_instances=object_instances,
+            assigned_dicts=assigned_dicts,
+        )
+        merge_field_mappings(resolved, runtime_fields)
+        return resolved
+    return_fields, _ = evaluate_bound_object_method(
+        method_template,
+        node,
+        instance_state,
+        variable_relations=variable_relations,
+        class_relations=class_relations or {},
+        variable_sources=variable_sources,
+        helper_templates=helper_templates,
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+        assigned_dicts=assigned_dicts,
     )
+    return return_fields
 
 
 def instantiate_object_method_relation(
     node: ast.Call,
     *,
     variable_relations: dict[str, str],
+    class_relations: dict[str, str] | None = None,
     variable_sources: dict[str, list[dict[str, str]]] | None = None,
     helper_templates: dict[str, dict[str, Any]] | None = None,
     helper_relation_templates: dict[str, dict[str, Any]] | None = None,
@@ -2024,28 +3245,50 @@ def instantiate_object_method_relation(
 ) -> str:
     if not isinstance(node.func, ast.Attribute) or not object_templates:
         return ""
-    owner = node.func.value
-    instance_state: dict[str, Any] | None = None
-    if isinstance(owner, ast.Name) and object_instances:
-        instance_state = object_instances.get(owner.id)
-    elif isinstance(owner, ast.Call):
-        instance_state = build_object_instance_state(
-            owner,
-            variable_relations,
-            variable_sources or {},
-            helper_templates or {},
-            helper_relation_templates or {},
-            object_templates,
-            object_instances,
-        )
+    instance_state = resolve_object_instance_from_expression(
+        node.func.value,
+        variable_relations,
+        class_relations or {},
+        variable_sources or {},
+        helper_templates or {},
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+    )
     if not instance_state:
         return ""
     class_template = object_templates.get(instance_state.get("class_name", ""), {})
     method_template = class_template.get("methods", {}).get(node.func.attr, {})
     return_relation = method_template.get("return_relation", "")
+    relation_bindings, _, _, _ = bind_object_method_call_state(
+        method_template,
+        node,
+        instance_state,
+        variable_relations=variable_relations,
+        class_relations=class_relations or {},
+        variable_sources=variable_sources or {},
+        helper_templates=helper_templates or {},
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+    )
     if return_relation.startswith("param:"):
-        return instance_state.get("relation_bindings", {}).get(return_relation.split(":", 1)[1], "")
-    return return_relation
+        return relation_bindings.get(return_relation.split(":", 1)[1], "")
+    if return_relation:
+        return return_relation
+    _, resolved_return_relation = evaluate_bound_object_method(
+        method_template,
+        node,
+        instance_state,
+        variable_relations=variable_relations,
+        class_relations=class_relations or {},
+        variable_sources=variable_sources or {},
+        helper_templates=helper_templates or {},
+        helper_relation_templates=helper_relation_templates,
+        object_templates=object_templates,
+        object_instances=object_instances,
+    )
+    return resolved_return_relation
 
 
 def extract_relation_from_annotation(node: ast.AST | None, class_relations: dict[str, str]) -> str:
@@ -2074,6 +3317,7 @@ def extract_relation_from_expression(
     object_templates: dict[str, dict[str, Any]] | None = None,
     object_instances: dict[str, dict[str, Any]] | None = None,
 ) -> str:
+    node = unwrap_await(node)
     if node is None:
         return ""
     if isinstance(node, ast.Name):
@@ -2082,12 +3326,15 @@ def extract_relation_from_expression(
         full_name = get_ast_name(node)
         if full_name in variable_relations:
             return variable_relations[full_name]
+        if full_name in class_relations:
+            return class_relations[full_name]
         if isinstance(node.value, ast.Name) and node.value.id in variable_relations:
             return variable_relations[node.value.id]
         return class_relations.get(node.attr, "")
     if isinstance(node, ast.Call):
-        if isinstance(node.func, ast.Name) and helper_relation_templates and node.func.id in helper_relation_templates:
-            template = helper_relation_templates.get(node.func.id, {})
+        function_name = get_ast_name(node.func)
+        if function_name and helper_relation_templates and function_name in helper_relation_templates:
+            template = helper_relation_templates.get(function_name, {})
             relation_bindings: dict[str, str] = {}
             for index, parameter_name in enumerate(template.get("params", [])):
                 argument = None

@@ -70,6 +70,7 @@
               <span>Details</span>
             </label>
             <button id="graph-add-object-button" type="button">Add object</button>
+            <button id="review-drawer-toggle" type="button">Review Inbox</button>
             <button id="remove-selection-button" class="danger-soft" type="button">Remove selected</button>
             <button id="center-selection-button" type="button">Center Selection</button>
             <button id="clear-filters-button" type="button">Reset View</button>
@@ -193,6 +194,15 @@
               <p>Loading authoring tools...</p>
             </div>
           </aside>
+          <aside id="review-drawer" class="review-drawer" hidden>
+            <div class="review-drawer-head">
+              <h2>Review Inbox</h2>
+              <button id="review-drawer-close" class="icon-button small" type="button" title="Close review inbox">x</button>
+            </div>
+            <div id="review-drawer-content">
+              <p>Loading review inbox...</p>
+            </div>
+          </aside>
         </section>
 
         <section class="detail-panel detail-panel-summary">
@@ -257,6 +267,25 @@
         <div class="section-actions">
           <button id="confirm-modal-cancel" class="ghost-button" type="button">Cancel</button>
           <button id="confirm-modal-ok" class="inline-button danger" type="button">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="review-action-modal" class="overlay-modal" hidden>
+      <div class="overlay-modal-backdrop" data-modal-close="review-action"></div>
+      <div class="overlay-modal-card">
+        <div class="overlay-modal-head">
+          <h2 id="review-action-modal-title">Review changes</h2>
+        </div>
+        <p id="review-action-modal-message" class="hint">Confirm this review decision.</p>
+        <div id="review-action-modal-summary" class="review-action-summary"></div>
+        <label class="form-field form-field-full review-action-note-field">
+          Reviewer note
+          <textarea id="review-action-modal-note" placeholder="Optional context for future reviewers"></textarea>
+        </label>
+        <div class="section-actions">
+          <button id="review-action-modal-cancel" class="ghost-button" type="button">Cancel</button>
+          <button id="review-action-modal-ok" class="inline-button" type="button">Confirm</button>
         </div>
       </div>
     </div>
