@@ -202,6 +202,8 @@ def scan_structure(
     include_internal: bool = True,
     profile_token: str | None = None,
     force_refresh: bool = False,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
     doc_paths: list[str] | None = None,
     selected_paths: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -212,6 +214,8 @@ def scan_structure(
         include_internal=include_internal,
         profile_token=profile_token,
         force_refresh=force_refresh,
+        profiling_mode=profiling_mode,
+        exclude_paths=exclude_paths,
     )
     doc_candidates = collect_document_candidates(root_dir, doc_paths or [])
     fingerprint = build_scan_fingerprint(

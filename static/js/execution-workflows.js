@@ -13,6 +13,10 @@ async function loadExecutionWorkflow(contractId, options = {}) {
   const normalizedContractId = getExecutionContractIdForRole(contractId);
   const taskId = String(options.taskId || "");
   const runId = String(options.runId || "");
+  const bundleId = String(options.bundleId || "");
+  const rootPath = String(options.rootPath || "");
+  const docPaths = Array.isArray(options.docPaths) ? options.docPaths : [];
+  const selectedPaths = Array.isArray(options.selectedPaths) ? options.selectedPaths : [];
   if (state.executionDirty && (taskId || runId)) {
     const saved = await saveExecutionState({ silent: true });
     if (!saved) {
@@ -25,6 +29,18 @@ async function loadExecutionWorkflow(contractId, options = {}) {
   }
   if (runId) {
     params.set("run_id", runId);
+  }
+  if (bundleId) {
+    params.set("bundle_id", bundleId);
+  }
+  if (rootPath) {
+    params.set("root_path", rootPath);
+  }
+  for (const path of docPaths) {
+    params.append("doc_paths", path);
+  }
+  for (const path of selectedPaths) {
+    params.append("selected_paths", path);
   }
   setStatus("Loading agent workflow...", `Computing the next guided workflow for ${normalizedContractId}.`);
   const response = await fetch(`/api/agent-contracts/${encodeURIComponent(normalizedContractId)}/workflow?${params.toString()}`);
@@ -70,6 +86,10 @@ async function launchExecutionWorkflow(contractId, options = {}) {
       updated_by: "user",
       task_id: String(options.taskId || ""),
       run_id: String(options.runId || ""),
+      bundle_id: String(options.bundleId || ""),
+      root_path: String(options.rootPath || ""),
+      doc_paths: Array.isArray(options.docPaths) ? options.docPaths : [],
+      selected_paths: Array.isArray(options.selectedPaths) ? options.selectedPaths : [],
     }),
   });
   const payload = await response.json();

@@ -33,6 +33,7 @@ AGENT_CONTRACTS = [
             "/api/plan-state",
             "/api/plans/latest",
             "/api/project/profile",
+            "/api/project/profile/jobs",
             "/api/structure/bundles",
         ],
         "writes": [
@@ -79,9 +80,11 @@ AGENT_CONTRACTS = [
             "/api/structure/bundles",
             "/api/structure/bundles/{bundle_id}",
             "/api/project/profile",
+            "/api/project/profile/jobs",
         ],
         "writes": [
             "/api/structure/scan",
+            "/api/project/profile/assets/jobs",
             "/api/plan-state",
             "/api/agent-runs",
             "/api/agent-runs/{run_id}",

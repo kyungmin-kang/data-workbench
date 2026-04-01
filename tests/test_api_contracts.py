@@ -45,7 +45,16 @@ class ApiContractTests(ApiTestCase):
         self.assertEqual(contract["supported_runtime_modes"], ["docker-compose", "local-python"])
         self.assertEqual(contract["supported_platforms"], ["macos", "linux"])
         self.assertEqual(contract["supported_endpoints"], EXPECTED_SUPPORTED_ENDPOINTS)
-        self.assertEqual(contract["supplemental_endpoints"], ["/api/graph", "/api/plans/latest", "/api/project/profile"])
+        self.assertEqual(
+            contract["supplemental_endpoints"],
+            [
+                "/api/graph",
+                "/api/plans/latest",
+                "/api/project/profile",
+                "/api/project/profile/jobs",
+                "/api/project/profile/assets/jobs",
+            ],
+        )
         self.assertEqual(
             contract["truth_layers"],
             {

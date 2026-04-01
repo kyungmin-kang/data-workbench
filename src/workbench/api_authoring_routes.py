@@ -131,6 +131,8 @@ def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str,
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
             profile_token=payload.profile_token,
+            profiling_mode=payload.profiling_mode,
+            exclude_paths=payload.exclude_paths,
         )
         if payload.hint_kind == "api":
             hint = next(
@@ -180,6 +182,8 @@ def import_project_bootstrap_endpoint(payload: ProjectBootstrapRequest) -> dict[
             include_tests=payload.include_tests,
             include_internal=payload.include_internal,
             profile_token=payload.profile_token,
+            profiling_mode=payload.profiling_mode,
+            exclude_paths=payload.exclude_paths,
         )
         imported = bootstrap_project_into_graph(
             graph,

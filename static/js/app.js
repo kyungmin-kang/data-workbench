@@ -50,6 +50,7 @@ const state = {
   },
   projectProfile: null,
   projectProfileJob: null,
+  projectAssetProfileJob: null,
   selectedProjectImports: [],
   selectedProjectApiHints: [],
   selectedProjectUiHints: [],
@@ -65,6 +66,9 @@ const state = {
     includeTests: false,
     includeInternal: true,
     rootPath: "",
+    profilingMode: "metadata_only",
+    excludePathsText: "",
+    agentEnrichAfterScan: false,
   },
   projectBootstrapOptions: {
     assets: true,

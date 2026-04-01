@@ -48,6 +48,10 @@ class AgentWorkflowLaunchRequest(BaseModel):
     updated_by: str = "user"
     task_id: str = ""
     run_id: str = ""
+    bundle_id: str = ""
+    root_path: str = ""
+    doc_paths: list[str] = []
+    selected_paths: list[str] = []
 
 
 class AssetImportRequest(BaseModel):
@@ -90,6 +94,8 @@ class ProjectHintImportRequest(BaseModel):
     root_path: str | None = None
     include_tests: bool = False
     include_internal: bool = True
+    profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
+    exclude_paths: list[str] = []
     actor_type: Literal["human", "agent"] = "human"
 
 
@@ -99,6 +105,8 @@ class ProjectBootstrapRequest(BaseModel):
     include_internal: bool = True
     profile_token: str | None = None
     root_path: str | None = None
+    profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
+    exclude_paths: list[str] = []
     asset_paths: list[str] = []
     api_hint_ids: list[str] = []
     ui_hint_ids: list[str] = []
@@ -118,6 +126,18 @@ class ProjectProfileJobRequest(BaseModel):
     root_path: str | None = None
     force_refresh: bool = False
     profile_token: str | None = None
+    profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
+    exclude_paths: list[str] = []
+
+
+class ProjectAssetProfileJobRequest(BaseModel):
+    root_path: str | None = None
+    include_tests: bool = False
+    include_internal: bool = True
+    profile_token: str | None = None
+    asset_paths: list[str] = []
+    asset_ids: list[str] = []
+    exclude_paths: list[str] = []
 
 
 class StructureImportRequest(BaseModel):
@@ -135,6 +155,8 @@ class StructureScanRequest(BaseModel):
     profile_token: str | None = None
     force_refresh: bool = False
     root_path: str | None = None
+    profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
+    exclude_paths: list[str] = []
     doc_paths: list[str] = []
     selected_paths: list[str] = []
 

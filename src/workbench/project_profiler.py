@@ -4,9 +4,12 @@ import ast
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -21,12 +24,15 @@ from .project_profiler_support import (
     PROJECT_PROFILE_CACHE_VERSION,
     append_hint_evidence_entry,
     build_project_profile_cache_token,
+    classify_data_asset_path,
+    data_asset_extension_for_format,
     enrich_sql_orm_hint_evidence,
     group_data_assets,
     is_ignored_project_dir_name,
     iter_project_files,
     load_cached_project_profile,
     profile_cache_matches,
+    project_profile_exclusion_signature,
     save_cached_project_profile,
     with_project_profile_cache_metadata,
 )
@@ -81,7 +87,13 @@ PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL = 200
 PROJECT_PROFILE_JOB_TTL_SECONDS = 60 * 60
 PROJECT_PROFILE_JOBS: dict[str, dict[str, Any]] = {}
 PROJECT_PROFILE_JOBS_LOCK = threading.Lock()
+PROJECT_ASSET_PROFILE_JOBS: dict[str, dict[str, Any]] = {}
+PROJECT_ASSET_PROFILE_JOBS_LOCK = threading.Lock()
 DEFAULT_PROJECT_PROFILE_MAX_ASSET_BYTES = 16 * 1024 * 1024
+
+
+def normalize_profiling_mode(value: str | None) -> str:
+    return "profile_assets" if str(value or "").strip().lower() == "profile_assets" else "metadata_only"
 
 
 def profile_project(
@@ -89,8 +101,11 @@ def profile_project(
     *,
     include_tests: bool = False,
     include_internal: bool = True,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
     manifests: list[str] = []
     code_files: list[str] = []
     docs: list[str] = []
@@ -101,6 +116,7 @@ def profile_project(
         root_dir,
         include_tests=include_tests,
         include_internal=include_internal,
+        exclude_paths=exclude_paths,
         is_test_path=is_test_path,
         is_internal_workbench_path=is_internal_workbench_path,
     ):
@@ -146,12 +162,22 @@ def profile_project(
             {
                 **progress_base,
                 "phase": "profiling_assets",
-                "message": f"Profiling {len(data_files)} detected data assets.",
+                "message": (
+                    f"Profiling {len(data_files)} detected data assets."
+                    if profiling_mode == "profile_assets"
+                    else f"Recording metadata for {len(data_files)} detected data assets."
+                ),
                 "data_assets_processed": 0,
                 "data_assets_total": len(data_files),
             }
         )
-    data_assets = summarize_data_assets(root_dir, data_files, progress_callback=progress_callback, progress_base=progress_base)
+    data_assets = summarize_data_assets(
+        root_dir,
+        data_files,
+        profiling_mode=profiling_mode,
+        progress_callback=progress_callback,
+        progress_base=progress_base,
+    )
     code_hints, code_hint_stats = summarize_code_hints(
         root_dir,
         code_files,
@@ -174,6 +200,8 @@ def profile_project(
         notes.append(
             f"Skipped {code_hint_stats['skipped_heavy_hint_files']} oversized or generated code files during hint discovery."
         )
+    if profiling_mode == "metadata_only" and data_assets:
+        notes.append("Discovery used metadata-only asset handling. Run explicit asset profiling to calculate row counts and sampled columns.")
 
     return {
         "root": str(root_dir),
@@ -192,6 +220,7 @@ def profile_project(
             "planning_data_hints": len(planning_hints["planning_data_hints"]),
             "planning_compute_hints": len(planning_hints["planning_compute_hints"]),
             "skipped_heavy_hint_files": code_hint_stats["skipped_heavy_hint_files"],
+            "profiling_mode": profiling_mode,
         },
         "manifests": manifests,
         "code_files_sample": code_files[:12],
@@ -215,12 +244,17 @@ def resolve_project_profile(
     include_internal: bool = True,
     profile_token: str | None = None,
     force_refresh: bool = False,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
     expected_token = build_project_profile_cache_token(
         root_dir,
         include_tests=include_tests,
         include_internal=include_internal,
+        profiling_mode=profiling_mode,
+        exclude_paths=exclude_paths,
     )
     candidate_tokens = [token for token in (profile_token, expected_token) if token]
     if not force_refresh:
@@ -231,6 +265,8 @@ def resolve_project_profile(
                 root_dir=root_dir,
                 include_tests=include_tests,
                 include_internal=include_internal,
+                profiling_mode=profiling_mode,
+                exclude_paths=exclude_paths,
             ):
                 if progress_callback:
                     progress_callback(
@@ -246,6 +282,8 @@ def resolve_project_profile(
         root_dir,
         include_tests=include_tests,
         include_internal=include_internal,
+        profiling_mode=profiling_mode,
+        exclude_paths=exclude_paths,
         progress_callback=progress_callback,
     )
     generated_at = utc_timestamp()
@@ -256,6 +294,8 @@ def resolve_project_profile(
         generated_at=generated_at,
         include_tests=include_tests,
         include_internal=include_internal,
+        profiling_mode=profiling_mode,
+        exclude_paths=exclude_paths,
     )
     save_cached_project_profile(cached_profile)
     return cached_profile
@@ -265,9 +305,11 @@ def summarize_data_assets(
     root_dir: Path,
     data_files: list[Path],
     *,
+    profiling_mode: str = "metadata_only",
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     progress_base: dict[str, Any] | None = None,
 ) -> list[dict]:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
     grouped_entries = group_data_assets(root_dir, data_files)
     summaries: list[dict] = []
     progress_base = progress_base or {}
@@ -277,19 +319,27 @@ def summarize_data_assets(
                 {
                     **progress_base,
                     "phase": "profiling_assets",
-                    "message": f"Profiling data asset {index} of {len(grouped_entries)}.",
+                    "message": (
+                        f"Profiling data asset {index} of {len(grouped_entries)}."
+                        if profiling_mode == "profile_assets"
+                        else f"Recording metadata for data asset {index} of {len(grouped_entries)}."
+                    ),
                     "current_path": str(entry.get("path", "")),
                     "data_assets_processed": index - 1,
                     "data_assets_total": len(grouped_entries),
                 }
             )
-        summaries.append(summarize_asset_entry(root_dir, entry))
+        summaries.append(summarize_asset_entry(root_dir, entry, profiling_mode=profiling_mode))
     if progress_callback and grouped_entries:
         progress_callback(
             {
                 **progress_base,
                 "phase": "profiling_assets",
-                "message": f"Profiled {len(grouped_entries)} data assets.",
+                "message": (
+                    f"Profiled {len(grouped_entries)} data assets."
+                    if profiling_mode == "profile_assets"
+                    else f"Recorded metadata for {len(grouped_entries)} data assets."
+                ),
                 "data_assets_processed": len(grouped_entries),
                 "data_assets_total": len(grouped_entries),
             }
@@ -414,7 +464,10 @@ def start_project_profile_job(
     include_internal: bool = True,
     profile_token: str | None = None,
     force_refresh: bool = False,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
     job_id = uuid.uuid4().hex[:12]
     job = {
         "job_id": job_id,
@@ -429,6 +482,8 @@ def start_project_profile_job(
             "include_internal": include_internal,
             "profile_token": profile_token or "",
             "force_refresh": force_refresh,
+            "profiling_mode": profiling_mode,
+            "exclude_paths": list(exclude_paths or []),
         },
         "progress": {
             "phase": "queued",
@@ -462,6 +517,8 @@ def start_project_profile_job(
                 include_internal=include_internal,
                 profile_token=profile_token,
                 force_refresh=force_refresh,
+                profiling_mode=profiling_mode,
+                exclude_paths=exclude_paths,
                 progress_callback=update_progress,
             )
         except Exception as error:  # pragma: no cover - defensive job wrapper
@@ -508,6 +565,138 @@ def get_project_profile_job(job_id: str) -> dict[str, Any] | None:
         return deepcopy(job) if job else None
 
 
+def start_project_asset_profile_job(
+    root_dir: Path,
+    *,
+    include_tests: bool = False,
+    include_internal: bool = True,
+    profile_token: str | None = None,
+    asset_paths: list[str] | None = None,
+    asset_ids: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": utc_timestamp(),
+        "started_at": "",
+        "completed_at": "",
+        "error": "",
+        "options": {
+            "root_path": str(root_dir),
+            "include_tests": include_tests,
+            "include_internal": include_internal,
+            "profile_token": profile_token or "",
+            "asset_paths": list(asset_paths or []),
+            "asset_ids": list(asset_ids or []),
+            "exclude_paths": list(exclude_paths or []),
+        },
+        "progress": {
+            "phase": "queued",
+            "message": "Queued explicit asset profiling.",
+            "assets_processed": 0,
+            "assets_total": len(asset_paths or asset_ids or []),
+            "updated_at": utc_timestamp(),
+        },
+        "asset_profiles": [],
+    }
+    with PROJECT_ASSET_PROFILE_JOBS_LOCK:
+        prune_project_asset_profile_jobs_locked()
+        PROJECT_ASSET_PROFILE_JOBS[job_id] = job
+
+    def update_progress(update: dict[str, Any]) -> None:
+        with PROJECT_ASSET_PROFILE_JOBS_LOCK:
+            current = PROJECT_ASSET_PROFILE_JOBS.get(job_id)
+            if current is None:
+                return
+            progress = current.setdefault("progress", {})
+            progress.update({key: value for key, value in update.items() if value is not None})
+            progress["updated_at"] = utc_timestamp()
+            if current["status"] == "queued":
+                current["status"] = "running"
+                current["started_at"] = progress["updated_at"]
+
+    def run_job() -> None:
+        update_progress({"phase": "starting", "message": "Loading cached discovery for selected assets."})
+        try:
+            project_profile = resolve_project_profile(
+                root_dir,
+                include_tests=include_tests,
+                include_internal=include_internal,
+                profile_token=profile_token,
+                profiling_mode="metadata_only",
+                exclude_paths=exclude_paths,
+            )
+            selected_entries = select_project_profile_assets(
+                project_profile,
+                asset_paths=asset_paths or [],
+                asset_ids=asset_ids or [],
+            )
+            if not selected_entries:
+                raise ValueError("No matching discovered assets were selected for profiling.")
+
+            asset_profiles: list[dict[str, Any]] = []
+            total = len(selected_entries)
+            for index, entry in enumerate(selected_entries, start=1):
+                update_progress(
+                    {
+                        "phase": "profiling_asset",
+                        "message": f"Profiling selected asset {index} of {total}.",
+                        "assets_processed": index - 1,
+                        "assets_total": total,
+                        "current_path": entry.get("path", ""),
+                        "current_asset_id": entry.get("id", ""),
+                    }
+                )
+                asset_profiles.append(profile_asset_entry_isolated(root_dir, entry))
+
+        except Exception as error:  # pragma: no cover - defensive job wrapper
+            with PROJECT_ASSET_PROFILE_JOBS_LOCK:
+                current = PROJECT_ASSET_PROFILE_JOBS.get(job_id)
+                if current is None:
+                    return
+                current["status"] = "failed"
+                current["error"] = str(error)
+                current["completed_at"] = utc_timestamp()
+                current.setdefault("progress", {}).update(
+                    {
+                        "phase": "failed",
+                        "message": str(error),
+                        "updated_at": current["completed_at"],
+                    }
+                )
+            return
+
+        with PROJECT_ASSET_PROFILE_JOBS_LOCK:
+            current = PROJECT_ASSET_PROFILE_JOBS.get(job_id)
+            if current is None:
+                return
+            current["status"] = "completed"
+            current["completed_at"] = utc_timestamp()
+            current["asset_profiles"] = asset_profiles
+            current.setdefault("progress", {}).update(
+                {
+                    "phase": "completed",
+                    "message": "Selected asset profiling is ready.",
+                    "assets_processed": len(asset_profiles),
+                    "assets_total": len(asset_profiles),
+                    "updated_at": current["completed_at"],
+                }
+            )
+
+    thread = threading.Thread(target=run_job, name=f"project-asset-profile-{job_id}", daemon=True)
+    thread.start()
+    return deepcopy(job)
+
+
+def get_project_asset_profile_job(job_id: str) -> dict[str, Any] | None:
+    with PROJECT_ASSET_PROFILE_JOBS_LOCK:
+        prune_project_asset_profile_jobs_locked()
+        job = PROJECT_ASSET_PROFILE_JOBS.get(job_id)
+        return deepcopy(job) if job else None
+
+
 def prune_project_profile_jobs_locked() -> None:
     cutoff = time.time() - PROJECT_PROFILE_JOB_TTL_SECONDS
     expired_ids = [
@@ -518,6 +707,18 @@ def prune_project_profile_jobs_locked() -> None:
     ]
     for job_id in expired_ids:
         PROJECT_PROFILE_JOBS.pop(job_id, None)
+
+
+def prune_project_asset_profile_jobs_locked() -> None:
+    cutoff = time.time() - PROJECT_PROFILE_JOB_TTL_SECONDS
+    expired_ids = [
+        job_id
+        for job_id, job in PROJECT_ASSET_PROFILE_JOBS.items()
+        if job.get("status") in {"completed", "failed"}
+        and parse_job_timestamp(job.get("completed_at", "") or job.get("created_at", "")) < cutoff
+    ]
+    for job_id in expired_ids:
+        PROJECT_ASSET_PROFILE_JOBS.pop(job_id, None)
 
 
 def parse_job_timestamp(value: str) -> float:
@@ -3473,19 +3674,30 @@ def is_internal_workbench_path(relative_path: str) -> bool:
     return normalized.startswith("src/workbench/") or normalized.startswith("src/data_workbench.egg-info/") or normalized.startswith("static/")
 
 
-def summarize_asset_entry(root_dir: Path, entry: dict[str, str | None]) -> dict:
+def summarize_asset_entry(
+    root_dir: Path,
+    entry: dict[str, Any],
+    *,
+    profiling_mode: str = "metadata_only",
+) -> dict:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
     path = entry["path"] or ""
     asset = build_asset_descriptor(path, root_dir=root_dir, kind=entry.get("kind"), fmt=entry.get("format"))
     summary = {
+        "id": build_profile_asset_id(path, fmt=entry.get("format"), kind=entry.get("kind")),
         "path": path,
         "kind": asset["kind"] if asset else "file",
         "format": asset["format"] if asset else "unknown",
         "profile_status": "schema_only",
         "row_count": None,
         "columns": [],
+        "collection_key": entry.get("collection_key", ""),
+        "member_count": int(entry.get("member_count", 0) or 0),
+        "member_paths_sample": list(entry.get("member_paths_sample", []) or []),
+        "group_reason": entry.get("group_reason", ""),
     }
     if asset and asset.get("accessible"):
-        skip_reason = should_skip_asset_profiling(asset)
+        skip_reason = should_skip_asset_profiling(asset, profiling_mode=profiling_mode)
         if skip_reason:
             summary["profiling_skipped_reason"] = skip_reason
         else:
@@ -3500,11 +3712,16 @@ def summarize_asset_entry(root_dir: Path, entry: dict[str, str | None]) -> dict:
                     {"name": column["name"], "data_type": column["data_type"]}
                     for column in profile["columns"]
                 ]
+    elif profiling_mode == "metadata_only":
+        summary["profiling_skipped_reason"] = "metadata_only"
     summary["suggested_import"] = build_import_suggestion(summary)
     return summary
 
 
-def should_skip_asset_profiling(asset: dict[str, Any]) -> str | None:
+def should_skip_asset_profiling(asset: dict[str, Any], *, profiling_mode: str = "metadata_only") -> str | None:
+    profiling_mode = normalize_profiling_mode(profiling_mode)
+    if profiling_mode != "profile_assets":
+        return "metadata_only"
     fmt = str(asset.get("format") or "unknown")
     if fmt in {"parquet", "parquet_collection"} and not project_profile_parquet_profiling_enabled():
         return "parquet_profiling_disabled"
@@ -3582,10 +3799,101 @@ def build_import_suggestion(asset_summary: dict) -> dict:
     }
 
 
+def build_profile_asset_id(path: str, *, fmt: str | None = None, kind: str | None = None) -> str:
+    payload = json.dumps({"path": path, "format": fmt or "", "kind": kind or ""}, sort_keys=True)
+    return f"asset.{uuid.uuid5(uuid.NAMESPACE_URL, payload).hex[:16]}"
+
+
+def select_project_profile_assets(
+    project_profile: dict[str, Any],
+    *,
+    asset_paths: list[str],
+    asset_ids: list[str],
+) -> list[dict[str, Any]]:
+    assets = list(project_profile.get("data_assets", []) or [])
+    if not asset_paths and not asset_ids:
+        return []
+    by_path = {str(item.get("path", "")): item for item in assets}
+    by_id = {str(item.get("id", "")): item for item in assets}
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for asset_id in asset_ids:
+        item = by_id.get(str(asset_id))
+        if item and item.get("id") not in seen:
+            ordered.append(item)
+            seen.add(str(item.get("id")))
+    for asset_path in asset_paths:
+        item = by_path.get(str(asset_path))
+        if item and item.get("id") not in seen:
+            ordered.append(item)
+            seen.add(str(item.get("id")))
+    return ordered
+
+
+def profile_asset_entry_isolated(root_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "root_path": str(root_dir),
+        "entry": {
+            "id": entry.get("id", ""),
+            "path": entry.get("path", ""),
+            "kind": entry.get("kind"),
+            "format": entry.get("format"),
+            "collection_key": entry.get("collection_key", ""),
+            "member_count": entry.get("member_count", 0),
+            "member_paths_sample": entry.get("member_paths_sample", []),
+            "group_reason": entry.get("group_reason", ""),
+        },
+    }
+    completed = subprocess.run(
+        [sys.executable, "-m", "workbench.project_profile_asset_worker"],
+        input=json.dumps(payload),
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip() or "Asset profiling subprocess failed."
+        return {
+            "id": entry.get("id", build_profile_asset_id(entry.get("path", ""), fmt=entry.get("format"), kind=entry.get("kind"))),
+            "path": entry.get("path", ""),
+            "kind": entry.get("kind") or "file",
+            "format": entry.get("format") or "unknown",
+            "profile_status": "schema_only",
+            "row_count": None,
+            "columns": [],
+            "error": message,
+            "collection_key": entry.get("collection_key", ""),
+            "member_count": int(entry.get("member_count", 0) or 0),
+            "member_paths_sample": list(entry.get("member_paths_sample", []) or []),
+            "group_reason": entry.get("group_reason", ""),
+            "suggested_import": build_import_suggestion(
+                {
+                    "path": entry.get("path", ""),
+                    "kind": entry.get("kind") or "file",
+                    "format": entry.get("format") or "unknown",
+                    "columns": [],
+                }
+            ),
+        }
+    return json.loads(completed.stdout)
+
+
 def humanize_asset_name(path: str) -> str:
     normalized = path.rstrip("/")
-    if normalized.endswith("*.parquet"):
-        normalized = normalized.rsplit("/", 2)[-2] if "/" in normalized else "parquet collection"
+    if "*" in normalized:
+        filename = normalized.rsplit("/", 1)[-1]
+        filename = filename.replace("*", "").strip("._- ")
+        if normalized.endswith("*.parquet"):
+            normalized = normalized.rsplit("/", 2)[-2] if "/" in normalized else "parquet collection"
+        elif filename:
+            if filename.endswith(".csv.gz"):
+                normalized = filename[:-7]
+            elif filename.endswith(".zip"):
+                normalized = filename[:-4]
+            else:
+                normalized = Path(filename).stem
+        else:
+            normalized = "collection"
     else:
         filename = normalized.rsplit("/", 1)[-1]
         if filename.endswith(".csv.gz"):

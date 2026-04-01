@@ -131,6 +131,20 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
       <div class="chip-row">
         <label class="hint"><input type="checkbox" data-project-profile-option="includeTests" ${state.projectProfileOptions.includeTests ? "checked" : ""} /> include tests</label>
         <label class="hint"><input type="checkbox" data-project-profile-option="includeInternal" ${state.projectProfileOptions.includeInternal ? "checked" : ""} /> include workbench internals</label>
+        <label class="hint"><input type="checkbox" data-project-profile-option="agentEnrichAfterScan" ${state.projectProfileOptions.agentEnrichAfterScan ? "checked" : ""} /> agent enrich after scan</label>
+      </div>
+      <div class="form-grid compact">
+        <label class="form-field">
+          Asset discovery mode
+          <select data-project-profile-select="profilingMode">
+            <option value="metadata_only" ${state.projectProfileOptions.profilingMode === "metadata_only" ? "selected" : ""}>metadata only</option>
+            <option value="profile_assets" ${state.projectProfileOptions.profilingMode === "profile_assets" ? "selected" : ""}>profile assets eagerly</option>
+          </select>
+        </label>
+        <label class="form-field form-field-full">
+          Exclude paths
+          <textarea data-project-profile-text="excludePathsText" placeholder="raw&#10;warehouse&#10;tmp">${escapeHtml(state.projectProfileOptions.excludePathsText || "")}</textarea>
+        </label>
       </div>
       <div class="chip-row">
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="assets" ${state.projectBootstrapOptions.assets ? "checked" : ""} /> bootstrap assets</label>
@@ -138,6 +152,7 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="uiHints" ${state.projectBootstrapOptions.uiHints ? "checked" : ""} /> bootstrap UI hints</label>
       </div>
       <p class="hint">${escapeHtml(bootstrapSummary)}</p>
+      <p class="hint">Default huge-repo path: run metadata-only discovery first, bootstrap from backend/docs, then profile only selected assets.</p>
       ${cacheSummary ? `<p class="hint">${escapeHtml(cacheSummary)}</p>` : ""}
       ${skippedHeavyHintFiles ? `<p class="hint">Skipped ${formatValue(skippedHeavyHintFiles)} oversized or generated files during hint discovery to keep large-repo scans responsive.</p>` : ""}
       ${notes.map((note) => `<p class="hint">${escapeHtml(note)}</p>`).join("")}
@@ -195,6 +210,8 @@ function renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedP
   const PAGE_SIZE = 50;
   const visibleSelectableCount = filteredDataAssets.filter((asset) => asset.suggested_import).length;
   const assetPage = paginateProjectDiscovery(filteredDataAssets, "assets", PAGE_SIZE);
+  const assetProfileJob = state.projectAssetProfileJob;
+  const assetProfileRunning = isProjectProfileJobActive(assetProfileJob);
   return `
     <div class="section">
       <div class="section-actions">
@@ -203,9 +220,11 @@ function renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedP
           <span class="hint">${formatValue(selectedPaths.size)} selected / ${formatValue(selectableCount)} suggested</span>
           <button class="ghost-button" type="button" data-project-select-all="true">Select visible suggested</button>
           <button class="ghost-button" type="button" data-project-clear-selection="true">Clear selection</button>
+          <button class="ghost-button" type="button" data-project-profile-assets="selected" ${selectedPaths.size ? "" : "disabled"}>${assetProfileRunning ? "Profiling..." : "Profile selected now"}</button>
           <button class="ghost-button" type="button" data-project-import-selected="true" ${selectedPaths.size ? "" : "disabled"}>Import selected now</button>
         </div>
       </div>
+      ${renderProjectAssetProfileProgress(assetProfileJob)}
       <div class="form-grid compact">
         <label class="form-field">
           Filter assets
@@ -235,13 +254,17 @@ function renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedP
                 ${asset.suggested_import ? `<label class="hint"><input type="checkbox" data-project-select="${escapeHtml(asset.path)}" ${selectedPaths.has(asset.path) ? "checked" : ""} /> select</label>` : ""}
                 <span class="pill">${escapeHtml(asset.format || "unknown")}</span>
                 <span class="pill">${escapeHtml(asset.profile_status || "schema_only")}</span>
+                ${(asset.member_count || 0) > 1 ? `<span class="pill">${formatValue(asset.member_count)} files</span>` : ""}
                 ${asset.suggested_import ? `<button class="text-button" type="button" data-project-import-load="${escapeHtml(asset.path)}">Load to import</button>` : ""}
+                <button class="ghost-button" type="button" data-project-profile-assets="${escapeHtml(asset.path)}">Profile now</button>
                 ${asset.suggested_import ? `<button class="ghost-button" type="button" data-project-import-run="${escapeHtml(asset.path)}">Import now</button>` : ""}
               </div>
             </div>
             <div class="column-meta">
               rows: ${formatValue(asset.row_count)} | columns: ${asset.columns?.map((column) => `${column.name} (${column.data_type})`).join(", ") || "missing"}
             </div>
+            ${asset.profiling_skipped_reason ? `<div class="column-meta">profiling: ${escapeHtml(asset.profiling_skipped_reason)}</div>` : ""}
+            ${asset.group_reason ? `<div class="column-meta">collection: ${escapeHtml(asset.group_reason)}${asset.collection_key ? ` · ${escapeHtml(asset.collection_key)}` : ""}</div>` : ""}
             ${asset.suggested_import ? `<div class="column-meta">suggested: ${escapeHtml(asset.suggested_import.source_label)} -> ${escapeHtml(asset.suggested_import.data_label)}</div>` : ""}
           </div>
         `).join("") : "<p>No data assets were detected. Run discovery again or widen the scope filters.</p>"}
@@ -1258,6 +1281,8 @@ async function loadStructureBundle(bundleId, options = {}) {
 
 async function runStructureScan() {
   const profileToken = state.projectProfile?.cache?.token || null;
+  const docPaths = parseMultilineList(state.structureDraft.docPathsText);
+  const selectedPaths = parseMultilineList(state.structureDraft.selectedPathsText);
   void primeCompletionNotifications();
   setStatus(
     "Scanning structure...",
@@ -1275,8 +1300,10 @@ async function runStructureScan() {
       include_internal: state.projectProfileOptions.includeInternal,
       profile_token: profileToken,
       root_path: state.projectProfileOptions.rootPath || "",
-      doc_paths: parseMultilineList(state.structureDraft.docPathsText),
-      selected_paths: parseMultilineList(state.structureDraft.selectedPathsText),
+      profiling_mode: state.projectProfileOptions.profilingMode || "metadata_only",
+      exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+      doc_paths: docPaths,
+      selected_paths: selectedPaths,
     }),
   });
   const payload = await response.json();
@@ -1298,6 +1325,14 @@ async function runStructureScan() {
     emoji: "🧪",
     tag: "structure-scan",
   });
+  if (state.projectProfileOptions.agentEnrichAfterScan && payload.bundle?.bundle_id) {
+    await loadExecutionWorkflow("workbench-scout", {
+      bundleId: payload.bundle.bundle_id,
+      rootPath: state.projectProfileOptions.rootPath || "",
+      docPaths,
+      selectedPaths,
+    });
+  }
 }
 
 async function reviewStructurePatch(bundleId, patchId, decision) {
@@ -1633,6 +1668,13 @@ function handleProjectProfileClick(event) {
     importSelectedProjectSuggestions();
     return;
   }
+  if (target.dataset.projectProfileAssets) {
+    const selection = target.dataset.projectProfileAssets === "selected"
+      ? [...(state.selectedProjectImports || [])]
+      : [target.dataset.projectProfileAssets];
+    startProjectAssetProfileJob(selection);
+    return;
+  }
   if (target.dataset.projectBootstrap) {
     importProjectBootstrap();
     return;
@@ -1695,6 +1737,15 @@ function handleProjectProfileMutation(event) {
     state.projectPresetDraft[target.dataset.projectPresetField] = target.value;
     return;
   }
+  if (target instanceof HTMLSelectElement && target.dataset.projectProfileSelect) {
+    state.projectProfileOptions[target.dataset.projectProfileSelect] = target.value;
+    renderProjectProfile();
+    return;
+  }
+  if (target instanceof HTMLTextAreaElement && target.dataset.projectProfileText) {
+    state.projectProfileOptions[target.dataset.projectProfileText] = target.value;
+    return;
+  }
   if (!(target instanceof HTMLInputElement)) {
     return;
   }
@@ -1731,6 +1782,115 @@ function handleProjectProfileMutation(event) {
 
 async function loadProjectProfile() {
   return loadProjectProfileWithOptions();
+}
+
+function mergeProfiledAssetsIntoProjectProfile(assetProfiles) {
+  if (!state.projectProfile || !Array.isArray(assetProfiles) || !assetProfiles.length) {
+    return;
+  }
+  const byId = new Map(assetProfiles.map((asset) => [asset.id, asset]));
+  const byPath = new Map(assetProfiles.map((asset) => [asset.path, asset]));
+  state.projectProfile.data_assets = (state.projectProfile.data_assets || []).map((asset) => (
+    byId.get(asset.id) || byPath.get(asset.path) || asset
+  ));
+}
+
+async function pollProjectAssetProfileJobUntilComplete(jobId) {
+  while (jobId) {
+    let response;
+    let payload;
+    try {
+      response = await fetch(`/api/project/profile/assets/jobs/${encodeURIComponent(jobId)}`);
+      payload = await response.json();
+    } catch (error) {
+      state.projectAssetProfileJob = null;
+      renderProjectProfile();
+      setStatus("Asset profiling failed", "The browser lost contact with the selected-asset profiling job.");
+      return;
+    }
+    if (!response.ok) {
+      state.projectAssetProfileJob = null;
+      renderProjectProfile();
+      setStatus("Asset profiling failed", payload.detail || payload.error || "Unable to profile the selected assets.");
+      return;
+    }
+    const job = payload.job || null;
+    state.projectAssetProfileJob = job;
+    renderProjectProfile();
+    if (isProjectProfileJobActive(job)) {
+      setStatus("🧪 Profiling selected assets...", describeProjectAssetProfileJob(job));
+      await sleep(700);
+      continue;
+    }
+    state.projectAssetProfileJob = null;
+    if (!job || job.status === "failed") {
+      renderProjectProfile();
+      setStatus("Asset profiling failed", job?.error || job?.progress?.message || "Unable to profile the selected assets.");
+      return;
+    }
+    mergeProfiledAssetsIntoProjectProfile(job.asset_profiles || []);
+    renderProjectProfile();
+    setStatus("Selected asset profiling ready", `${formatValue((job.asset_profiles || []).length)} asset${(job.asset_profiles || []).length === 1 ? "" : "s"} updated with explicit profile results.`);
+    return;
+  }
+}
+
+async function startProjectAssetProfileJob(assetPaths) {
+  if (!state.projectProfile) {
+    setStatus("Asset profiling unavailable", "Run project discovery first.");
+    return;
+  }
+  const selected = Array.from(new Set((assetPaths || []).filter(Boolean)));
+  if (!selected.length) {
+    setStatus("Asset profiling skipped", "Choose one or more discovered assets first.");
+    return;
+  }
+  if (isProjectProfileJobActive(state.projectAssetProfileJob)) {
+    setStatus("Asset profiling already running", describeProjectAssetProfileJob(state.projectAssetProfileJob));
+    return;
+  }
+  state.projectAssetProfileJob = {
+    status: "queued",
+    progress: {
+      phase: "queued",
+      message: "Queued explicit asset profiling.",
+      assets_processed: 0,
+      assets_total: selected.length,
+    },
+  };
+  renderProjectProfile();
+  setStatus("🧪 Profiling selected assets...", "Running isolated profiling for the selected assets.");
+  let response;
+  let payload;
+  try {
+    response = await fetch("/api/project/profile/assets/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        root_path: state.projectProfileOptions.rootPath || "",
+        include_tests: state.projectProfileOptions.includeTests,
+        include_internal: state.projectProfileOptions.includeInternal,
+        profile_token: state.projectProfile?.cache?.token || "",
+        asset_paths: selected,
+        exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+      }),
+    });
+    payload = await response.json();
+  } catch (error) {
+    state.projectAssetProfileJob = null;
+    renderProjectProfile();
+    setStatus("Asset profiling failed", "The browser could not start the selected-asset profiling job.");
+    return;
+  }
+  if (!response.ok) {
+    state.projectAssetProfileJob = null;
+    renderProjectProfile();
+    setStatus("Asset profiling failed", payload.detail || payload.error || "Unable to profile the selected assets.");
+    return;
+  }
+  state.projectAssetProfileJob = payload.job || state.projectAssetProfileJob;
+  renderProjectProfile();
+  await pollProjectAssetProfileJobUntilComplete(state.projectAssetProfileJob?.job_id || "");
 }
 
 async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
@@ -1773,6 +1933,8 @@ async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
     state.projectProfileOptions.includeTests = context.includeTests ?? state.projectProfileOptions.includeTests;
     state.projectProfileOptions.includeInternal = context.includeInternal ?? state.projectProfileOptions.includeInternal;
     state.projectProfileOptions.rootPath = state.projectProfile?.root || context.rootPath || "";
+    state.projectProfileOptions.profilingMode = context.profilingMode || state.projectProfileOptions.profilingMode;
+    state.projectProfileOptions.excludePathsText = context.excludePathsText ?? state.projectProfileOptions.excludePathsText;
     resetProjectProfilePages();
     if (context.preset) {
       applyProjectPresetSelections(context.preset);
@@ -1802,6 +1964,8 @@ async function loadProjectProfileWithOptions(options = {}) {
   const includeTests = options.includeTests ?? state.projectProfileOptions.includeTests;
   const includeInternal = options.includeInternal ?? state.projectProfileOptions.includeInternal;
   const rootPath = options.rootPath ?? state.projectProfileOptions.rootPath;
+  const profilingMode = options.profilingMode ?? state.projectProfileOptions.profilingMode;
+  const excludePaths = parseMultilineList(options.excludePathsText ?? state.projectProfileOptions.excludePathsText);
   state.projectProfileJob = {
     status: "queued",
     progress: {
@@ -1825,6 +1989,8 @@ async function loadProjectProfileWithOptions(options = {}) {
         force_refresh: Boolean(options.forceRefresh),
         root_path: rootPath || "",
         profile_token: state.projectProfile?.cache?.token || "",
+        profiling_mode: profilingMode || "metadata_only",
+        exclude_paths: excludePaths,
       }),
     });
     payload = await response.json();
@@ -1848,6 +2014,8 @@ async function loadProjectProfileWithOptions(options = {}) {
     includeTests,
     includeInternal,
     rootPath,
+    profilingMode,
+    excludePathsText: options.excludePathsText ?? state.projectProfileOptions.excludePathsText,
     preset: options.preset,
   });
 }
@@ -1891,6 +2059,9 @@ async function applySelectedProjectPreset() {
   state.projectProfileOptions.includeTests = preset.include_tests;
   state.projectProfileOptions.includeInternal = preset.include_internal;
   state.projectProfileOptions.rootPath = preset.root || state.projectProfileOptions.rootPath;
+  state.projectProfileOptions.profilingMode = preset.profiling_mode || "metadata_only";
+  state.projectProfileOptions.excludePathsText = (preset.exclude_paths || []).join("\n");
+  state.projectProfileOptions.agentEnrichAfterScan = preset.agent_enrich_after_scan === true;
   state.projectBootstrapOptions = {
     assets: preset.bootstrap_options?.assets !== false,
     apiHints: preset.bootstrap_options?.apiHints !== false,
@@ -1901,6 +2072,8 @@ async function applySelectedProjectPreset() {
     includeTests: preset.include_tests,
     includeInternal: preset.include_internal,
     rootPath: preset.root || state.projectProfileOptions.rootPath,
+    profilingMode: preset.profiling_mode || "metadata_only",
+    excludePathsText: (preset.exclude_paths || []).join("\n"),
     preset,
   });
   setStatus("Preset applied", `${preset.name} is now loaded into the onboarding wizard.`);
@@ -1931,6 +2104,9 @@ async function saveCurrentProjectPreset() {
     root: state.projectProfileOptions.rootPath || state.projectProfile?.root || "",
     include_tests: state.projectProfileOptions.includeTests,
     include_internal: state.projectProfileOptions.includeInternal,
+    exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+    profiling_mode: state.projectProfileOptions.profilingMode || "metadata_only",
+    agent_enrich_after_scan: state.projectProfileOptions.agentEnrichAfterScan === true,
     bootstrap_options: { ...state.projectBootstrapOptions },
     selected_asset_paths: [...(state.selectedProjectImports || [])],
     selected_api_hint_ids: [...(state.selectedProjectApiHints || [])],
@@ -1973,4 +2149,3 @@ async function deleteSelectedProjectPreset() {
   renderProjectProfile();
   setStatus("Preset deleted", `${preset.name} was removed from saved onboarding presets.`);
 }
-

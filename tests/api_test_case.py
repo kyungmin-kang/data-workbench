@@ -28,6 +28,16 @@ class ApiTestCase(WorkbenchTempRootMixin, unittest.TestCase):
             time.sleep(0.01)
         self.fail(f"Timed out waiting for project profile job {job_id}")
 
+    def wait_for_project_asset_profile_job(self, job_id: str) -> dict[str, Any]:
+        for _ in range(200):
+            response = self.client.get(f"/api/project/profile/assets/jobs/{job_id}")
+            self.assertEqual(response.status_code, 200)
+            job = response.json()["job"]
+            if job["status"] in {"completed", "failed"}:
+                return job
+            time.sleep(0.01)
+        self.fail(f"Timed out waiting for project asset profile job {job_id}")
+
     def make_valid_plan_state(
         self,
         *,

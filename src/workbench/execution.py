@@ -47,6 +47,8 @@ SOURCE_OF_TRUTH_SUPPLEMENTAL_ENDPOINTS = [
     "/api/graph",
     "/api/plans/latest",
     "/api/project/profile",
+    "/api/project/profile/jobs",
+    "/api/project/profile/assets/jobs",
 ]
 
 

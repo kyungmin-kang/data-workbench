@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from .agent_briefs import build_agent_assignment_brief
@@ -66,7 +66,15 @@ def get_agent_contract_brief(contract_id: str, task_id: str = "", run_id: str = 
 
 
 @router.get("/api/agent-contracts/{contract_id}/workflow")
-def get_agent_contract_workflow(contract_id: str, task_id: str = "", run_id: str = "") -> dict[str, Any]:
+def get_agent_contract_workflow(
+    contract_id: str,
+    task_id: str = "",
+    run_id: str = "",
+    bundle_id: str = "",
+    root_path: str = "",
+    doc_paths: list[str] = Query(default_factory=list),
+    selected_paths: list[str] = Query(default_factory=list),
+) -> dict[str, Any]:
     contract = get_agent_contract(contract_id)
     if contract is None:
         raise HTTPException(status_code=404, detail=f"Agent contract not found: {contract_id}")
@@ -80,6 +88,10 @@ def get_agent_contract_workflow(contract_id: str, task_id: str = "", run_id: str
             source_of_truth=payload["source_of_truth"],
             task_id=task_id,
             run_id=run_id,
+            bundle_id=bundle_id,
+            root_path=root_path,
+            doc_paths=doc_paths,
+            selected_paths=selected_paths,
         )
         return {"workflow": workflow, "source_of_truth": payload["source_of_truth"]}
     except ValueError as error:

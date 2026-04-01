@@ -41,7 +41,17 @@ class AssetImportSpec(BaseModel):
     source_series_id: str = ""
     raw_asset_label: str = ""
     raw_asset_kind: Literal["file", "object_storage", "glob", "directory"] = "file"
-    raw_asset_format: Literal["csv", "csv_gz", "parquet", "parquet_collection", "zip_csv", "unknown"] = "unknown"
+    raw_asset_format: Literal[
+        "csv",
+        "csv_collection",
+        "csv_gz",
+        "csv_gz_collection",
+        "parquet",
+        "parquet_collection",
+        "zip_csv",
+        "zip_csv_collection",
+        "unknown",
+    ] = "unknown"
     raw_asset_value: str
     profile_ready: bool = True
     data_label: str

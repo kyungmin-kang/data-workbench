@@ -87,6 +87,8 @@ def structure_scan_endpoint(payload: StructureScanRequest) -> dict[str, Any]:
             include_internal=payload.include_internal,
             profile_token=payload.profile_token,
             force_refresh=payload.force_refresh,
+            profiling_mode=payload.profiling_mode,
+            exclude_paths=payload.exclude_paths,
             doc_paths=payload.doc_paths,
             selected_paths=payload.selected_paths,
         )

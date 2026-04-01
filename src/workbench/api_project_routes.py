@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from .api_helpers import resolve_profile_root, search_project_directories
-from .api_models import OnboardingPresetSaveRequest, ProjectProfileJobRequest
+from .api_models import OnboardingPresetSaveRequest, ProjectAssetProfileJobRequest, ProjectProfileJobRequest
 from .onboarding_presets import delete_onboarding_preset, load_onboarding_presets, save_onboarding_preset
-from .project_profiler import get_project_profile_job, resolve_project_profile, start_project_profile_job
+from .project_profiler import (
+    get_project_asset_profile_job,
+    get_project_profile_job,
+    resolve_project_profile,
+    start_project_asset_profile_job,
+    start_project_profile_job,
+)
 
 
 router = APIRouter()
@@ -19,6 +25,8 @@ def get_project_profile(
     include_internal: bool = True,
     root_path: str | None = None,
     force_refresh: bool = False,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] = Query(default_factory=list),
 ) -> dict[str, Any]:
     root_dir = resolve_profile_root(root_path)
     return {
@@ -27,6 +35,8 @@ def get_project_profile(
             include_tests=include_tests,
             include_internal=include_internal,
             force_refresh=force_refresh,
+            profiling_mode=profiling_mode,
+            exclude_paths=exclude_paths,
         )
     }
 
@@ -40,6 +50,8 @@ def create_project_profile_job(payload: ProjectProfileJobRequest) -> dict[str, A
         include_internal=payload.include_internal,
         profile_token=payload.profile_token,
         force_refresh=payload.force_refresh,
+        profiling_mode=payload.profiling_mode,
+        exclude_paths=payload.exclude_paths,
     )
     return {"job": job}
 
@@ -49,6 +61,29 @@ def get_project_profile_job_endpoint(job_id: str) -> dict[str, Any]:
     job = get_project_profile_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Project discovery job not found: {job_id}")
+    return {"job": job}
+
+
+@router.post("/api/project/profile/assets/jobs")
+def create_project_asset_profile_job(payload: ProjectAssetProfileJobRequest) -> dict[str, Any]:
+    root_dir = resolve_profile_root(payload.root_path)
+    job = start_project_asset_profile_job(
+        root_dir,
+        include_tests=payload.include_tests,
+        include_internal=payload.include_internal,
+        profile_token=payload.profile_token,
+        asset_paths=payload.asset_paths,
+        asset_ids=payload.asset_ids,
+        exclude_paths=payload.exclude_paths,
+    )
+    return {"job": job}
+
+
+@router.get("/api/project/profile/assets/jobs/{job_id}")
+def get_project_asset_profile_job_endpoint(job_id: str) -> dict[str, Any]:
+    job = get_project_asset_profile_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Project asset profiling job not found: {job_id}")
     return {"job": job}
 
 

@@ -142,10 +142,16 @@ def profile_asset(asset: dict, root_dir: Path) -> dict | None:
     fmt = asset.get("format", "unknown")
     if fmt == "csv":
         return profile_frame(read_csv_asset(asset), asset["profile_target"], asset)
+    if fmt == "csv_collection":
+        return profile_frame(read_csv_collection(asset), asset["profile_target"], asset)
     if fmt == "csv_gz":
         return profile_frame(read_gzip_csv_asset(asset), asset["profile_target"], asset)
+    if fmt == "csv_gz_collection":
+        return profile_frame(read_gzip_csv_collection(asset), asset["profile_target"], asset)
     if fmt == "zip_csv":
         return profile_frame(read_zip_csv_asset(asset), asset["profile_target"], asset)
+    if fmt == "zip_csv_collection":
+        return profile_frame(read_zip_csv_collection(asset), asset["profile_target"], asset)
     if fmt == "parquet":
         return profile_frame(pl.read_parquet(asset["path"]), asset["profile_target"], asset)
     if fmt == "parquet_collection":
@@ -187,9 +193,28 @@ def read_csv_asset(asset: dict) -> pl.DataFrame:
     return pl.read_csv(asset["path"], try_parse_dates=True)
 
 
+def read_csv_collection(asset: dict) -> pl.DataFrame:
+    paths = asset.get("paths", [])
+    if not paths:
+        raise ValueError(f"No CSV files found for {asset['profile_target']}")
+    frames = [pl.read_csv(path, try_parse_dates=True) for path in paths]
+    return pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
+
+
 def read_gzip_csv_asset(asset: dict) -> pl.DataFrame:
     with gzip.open(asset["path"], "rb") as handle:
         return pl.read_csv(io.BytesIO(handle.read()), try_parse_dates=True)
+
+
+def read_gzip_csv_collection(asset: dict) -> pl.DataFrame:
+    paths = asset.get("paths", [])
+    if not paths:
+        raise ValueError(f"No gzipped CSV files found for {asset['profile_target']}")
+    frames = []
+    for path in paths:
+        with gzip.open(path, "rb") as handle:
+            frames.append(pl.read_csv(io.BytesIO(handle.read()), try_parse_dates=True))
+    return pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
 
 
 def read_zip_csv_asset(asset: dict) -> pl.DataFrame:
@@ -199,6 +224,14 @@ def read_zip_csv_asset(asset: dict) -> pl.DataFrame:
             raise ValueError(f"No CSV file found inside archive {asset['path']}")
         with archive.open(csv_names[0]) as handle:
             return pl.read_csv(io.BytesIO(handle.read()), try_parse_dates=True)
+
+
+def read_zip_csv_collection(asset: dict) -> pl.DataFrame:
+    paths = asset.get("paths", [])
+    if not paths:
+        raise ValueError(f"No zipped CSV files found for {asset['profile_target']}")
+    frames = [read_zip_csv_asset({"path": path, "profile_target": str(path)}) for path in paths]
+    return pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
 
 
 def read_parquet_collection(asset: dict) -> pl.DataFrame:

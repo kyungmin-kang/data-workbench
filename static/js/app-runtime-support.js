@@ -149,6 +149,42 @@ function renderProjectDiscoveryProgress(job) {
   `;
 }
 
+function describeProjectAssetProfileJob(job) {
+  const progress = job?.progress || {};
+  const details = [];
+  if (typeof progress.assets_processed === "number" && typeof progress.assets_total === "number" && progress.assets_total) {
+    details.push(`${formatValue(progress.assets_processed)}/${formatValue(progress.assets_total)} assets`);
+  }
+  if (progress.current_path) {
+    details.push(`Current: ${truncateMiddle(progress.current_path)}`);
+  }
+  return [progress.message || "", details.join(" · ")].filter(Boolean).join(" ");
+}
+
+function renderProjectAssetProfileProgress(job) {
+  if (!isProjectProfileJobActive(job)) {
+    return "";
+  }
+  return `
+    <div class="discovery-progress-card">
+      <div class="discovery-progress-header">
+        <span class="loading-emoji" aria-hidden="true">🧪</span>
+        <div>
+          <strong>Asset profiling in progress</strong>
+          <div class="hint">${escapeHtml(describeProjectAssetProfileJob(job) || "Profiling selected assets one at a time.")}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function parseMultilineList(text) {
+  return String(text || "")
+    .split("\n")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 function cssEscapeValue(value) {
   if (window.CSS && typeof window.CSS.escape === "function") {
     return window.CSS.escape(String(value));
@@ -1376,4 +1412,3 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
-

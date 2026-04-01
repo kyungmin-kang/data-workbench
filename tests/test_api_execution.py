@@ -679,6 +679,64 @@ export async function DemoPricingPanel() {
         self.assertIn("review_bundle", qa_action_kinds)
         self.assertIn("validate_checks", qa_action_kinds)
 
+    def test_agent_workflow_and_launch_accept_scan_context(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "scan_context.md").write_text("GET /api/demo/scan-context\n", encoding="utf-8")
+
+        scan_response = self.client.post(
+            "/api/structure/scan",
+            json={
+                "role": "scout",
+                "scope": "full",
+                "root_path": str(self.root),
+                "doc_paths": ["docs/scan_context.md"],
+                "selected_paths": ["backend"],
+                "include_internal": False,
+            },
+        )
+        self.assertEqual(scan_response.status_code, 200)
+        bundle_id = scan_response.json()["bundle"]["bundle_id"]
+
+        plan_state = self.make_valid_plan_state(decision_status="accepted", task_status="todo")
+        save_response = self.client.put(
+            "/api/plan-state",
+            json={"plan_state": plan_state, "expected_revision": 0, "updated_by": "scout"},
+        )
+        self.assertEqual(save_response.status_code, 200)
+        revision = save_response.json()["plan_state"]["revision"]
+
+        workflow_response = self.client.get(
+            "/api/agent-contracts/workbench-scout/workflow",
+            params=[
+                ("bundle_id", bundle_id),
+                ("root_path", str(self.root)),
+                ("doc_paths", "docs/scan_context.md"),
+                ("selected_paths", "backend"),
+            ],
+        )
+        self.assertEqual(workflow_response.status_code, 200)
+        workflow = workflow_response.json()["workflow"]
+        self.assertEqual(workflow["scan_context"]["bundle_id"], bundle_id)
+        self.assertEqual(workflow["scan_context"]["doc_paths"], ["docs/scan_context.md"])
+        self.assertEqual(workflow["recommended_bundle"]["bundle_id"], bundle_id)
+
+        launch_response = self.client.post(
+            "/api/agent-contracts/workbench-scout/launch",
+            json={
+                "expected_revision": revision,
+                "updated_by": "scout",
+                "bundle_id": bundle_id,
+                "root_path": str(self.root),
+                "doc_paths": ["docs/scan_context.md"],
+                "selected_paths": ["backend"],
+            },
+        )
+        self.assertEqual(launch_response.status_code, 200)
+        payload = launch_response.json()
+        self.assertEqual(payload["agent_run"]["bundle_id"], bundle_id)
+        self.assertEqual(payload["workflow"]["scan_context"]["selected_paths"], ["backend"])
+
     def test_agent_run_patch_rejects_stale_revision(self) -> None:
         plan_state = self.make_valid_plan_state(decision_status="in_progress", task_status="todo")
         save_response = self.client.put(

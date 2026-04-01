@@ -6,11 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from .store import get_cache_dir
 
-PROJECT_PROFILE_CACHE_VERSION = "3"
+PROJECT_PROFILE_CACHE_VERSION = "4"
 DEFAULT_IGNORED_PARTS = {
     ".git",
     ".venv",
@@ -38,15 +39,28 @@ DEFAULT_IGNORED_PARTS = {
     "site-packages",
 }
 
+CSV_COLLECTION_TOKEN_RE = re.compile(
+    r"(?i)(?:^|[_\-.])(?:part|chunk|shard|segment|batch|partition|slice|page|split|file|dataset)(?:[_\-.]?(?:\d+|[a-z0-9]+))+$"
+)
+CSV_COLLECTION_DATE_RE = re.compile(
+    r"(?i)(?:^|[_\-.])20\d{2}(?:[_\-.]?\d{2}){1,2}(?:$|[_\-.])?"
+)
+CSV_COLLECTION_COUNTER_RE = re.compile(r"(?i)(?:^|[_\-.])\d{2,}(?:$|[_\-.])?")
 
-def get_project_profile_exclusion_roots(root_dir: Path) -> list[Path]:
-    raw = (os.environ.get("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS") or "").strip()
-    if not raw:
-        return []
+
+def normalize_project_profile_exclude_paths(root_dir: Path, exclude_paths: list[str] | None = None) -> list[Path]:
+    raw_entries: list[str] = []
+    if exclude_paths:
+        raw_entries.extend(exclude_paths)
+    else:
+        raw = (os.environ.get("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS") or "").strip()
+        if raw:
+            raw_entries.extend(raw.replace("\n", ",").split(","))
+
     roots: list[Path] = []
     seen: set[str] = set()
-    for entry in raw.replace("\n", ",").split(","):
-        candidate = entry.strip()
+    for entry in raw_entries:
+        candidate = str(entry or "").strip()
         if not candidate:
             continue
         path = Path(candidate).expanduser()
@@ -59,8 +73,12 @@ def get_project_profile_exclusion_roots(root_dir: Path) -> list[Path]:
     return roots
 
 
-def project_profile_exclusion_signature(root_dir: Path) -> str:
-    roots = get_project_profile_exclusion_roots(root_dir)
+def get_project_profile_exclusion_roots(root_dir: Path, exclude_paths: list[str] | None = None) -> list[Path]:
+    return normalize_project_profile_exclude_paths(root_dir, exclude_paths)
+
+
+def project_profile_exclusion_signature(root_dir: Path, exclude_paths: list[str] | None = None) -> str:
+    roots = get_project_profile_exclusion_roots(root_dir, exclude_paths)
     if not roots:
         return ""
     payload = json.dumps(sorted(str(path) for path in roots))
@@ -72,13 +90,16 @@ def build_project_profile_cache_token(
     *,
     include_tests: bool,
     include_internal: bool,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
 ) -> str:
     payload = json.dumps(
         {
             "root": str(root_dir.resolve()),
             "include_tests": include_tests,
             "include_internal": include_internal,
-            "exclude_signature": project_profile_exclusion_signature(root_dir),
+            "profiling_mode": profiling_mode,
+            "exclude_signature": project_profile_exclusion_signature(root_dir, exclude_paths),
             "version": PROJECT_PROFILE_CACHE_VERSION,
         },
         sort_keys=True,
@@ -122,16 +143,22 @@ def with_project_profile_cache_metadata(
     generated_at: str | None = None,
     include_tests: bool | None = None,
     include_internal: bool | None = None,
+    profiling_mode: str | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     profile = deepcopy(project_profile)
     existing_cache = profile.get("cache", {}) if isinstance(profile.get("cache", {}), dict) else {}
+    root_dir = Path(profile.get("root") or ".")
+    normalized_excludes = [str(path) for path in normalize_project_profile_exclude_paths(root_dir, exclude_paths)]
     profile["cache"] = {
         "token": token or existing_cache.get("token", ""),
         "generated_at": generated_at or existing_cache.get("generated_at", ""),
         "cached": cached,
         "include_tests": include_tests if include_tests is not None else bool(existing_cache.get("include_tests", False)),
         "include_internal": include_internal if include_internal is not None else bool(existing_cache.get("include_internal", True)),
-        "exclude_signature": project_profile_exclusion_signature(Path(profile.get("root") or ".")),
+        "profiling_mode": profiling_mode or str(existing_cache.get("profiling_mode", "metadata_only") or "metadata_only"),
+        "exclude_paths": normalized_excludes or list(existing_cache.get("exclude_paths", []) or []),
+        "exclude_signature": project_profile_exclusion_signature(root_dir, exclude_paths),
         "version": PROJECT_PROFILE_CACHE_VERSION,
     }
     return profile
@@ -143,6 +170,8 @@ def profile_cache_matches(
     root_dir: Path,
     include_tests: bool,
     include_internal: bool,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
 ) -> bool:
     cache = project_profile.get("cache", {})
     if project_profile.get("root") != str(root_dir):
@@ -150,7 +179,8 @@ def profile_cache_matches(
     return (
         bool(cache.get("include_tests", False)) == include_tests
         and bool(cache.get("include_internal", True)) == include_internal
-        and str(cache.get("exclude_signature", "")) == project_profile_exclusion_signature(root_dir)
+        and str(cache.get("profiling_mode", "metadata_only") or "metadata_only") == profiling_mode
+        and str(cache.get("exclude_signature", "")) == project_profile_exclusion_signature(root_dir, exclude_paths)
     )
 
 
@@ -163,10 +193,11 @@ def iter_project_files(
     *,
     include_tests: bool,
     include_internal: bool,
+    exclude_paths: list[str] | None = None,
     is_test_path: Callable[[str], bool],
     is_internal_workbench_path: Callable[[str], bool],
 ):
-    excluded_roots = get_project_profile_exclusion_roots(root_dir)
+    excluded_roots = get_project_profile_exclusion_roots(root_dir, exclude_paths)
 
     def is_excluded(path: Path) -> bool:
         resolved = path.resolve()
@@ -203,24 +234,114 @@ def iter_project_files(
 
 def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
     parquet_by_dir: dict[str, list[str]] = defaultdict(list)
-    direct_entries: list[dict[str, str | None]] = []
+    grouped_collections: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    direct_entries: list[dict[str, Any]] = []
 
     for path in data_files:
         relative = path.relative_to(root_dir).as_posix()
-        if path.suffix.lower() == ".parquet":
+        fmt, extension = classify_data_asset_path(relative)
+        if fmt == "parquet":
             parquet_by_dir[str(path.relative_to(root_dir).parent).replace("\\", "/")].append(relative)
             continue
-        direct_entries.append({"path": relative, "kind": None, "format": None})
+        collection_key = derive_collection_group_key(relative, fmt)
+        if collection_key is not None:
+            grouped_collections[collection_key].append(relative)
+            continue
+        direct_entries.append({"path": relative, "kind": None, "format": fmt, "extension": extension})
 
-    grouped_entries: list[dict[str, str | None]] = []
+    grouped_entries: list[dict[str, Any]] = []
     for parent, files in sorted(parquet_by_dir.items()):
         if len(files) > 1:
             pattern = f"{parent}/*.parquet" if parent != "." else "*.parquet"
-            grouped_entries.append({"path": pattern, "kind": "glob", "format": "parquet_collection"})
+            grouped_entries.append(
+                {
+                    "path": pattern,
+                    "kind": "glob",
+                    "format": "parquet_collection",
+                    "collection_key": f"parquet:{parent}",
+                    "member_count": len(files),
+                    "member_paths_sample": files[:8],
+                    "group_reason": "shared_parent_parquet_directory",
+                }
+            )
             continue
-        grouped_entries.append({"path": files[0], "kind": None, "format": None})
+        grouped_entries.append({"path": files[0], "kind": None, "format": "parquet"})
+
+    for (parent, fmt, normalized_stem), files in sorted(grouped_collections.items()):
+        if len(files) < 2:
+            grouped_entries.extend(
+                {"path": relative, "kind": None, "format": fmt}
+                for relative in files
+            )
+            continue
+        extension = data_asset_extension_for_format(fmt)
+        pattern_stem = normalized_stem or "*"
+        pattern = f"{parent}/{pattern_stem}*{extension}" if parent != "." else f"{pattern_stem}*{extension}"
+        grouped_entries.append(
+            {
+                "path": pattern,
+                "kind": "glob",
+                "format": f"{fmt}_collection",
+                "collection_key": f"{fmt}:{parent}:{normalized_stem}",
+                "member_count": len(files),
+                "member_paths_sample": files[:8],
+                "group_reason": "normalized_partition_stem",
+            }
+        )
 
     return sorted(direct_entries + grouped_entries, key=lambda item: item["path"] or "")
+
+
+def classify_data_asset_path(relative_path: str) -> tuple[str, str]:
+    lower_path = relative_path.lower()
+    if lower_path.endswith(".csv.gz"):
+        return "csv_gz", ".csv.gz"
+    if lower_path.endswith(".csv"):
+        return "csv", ".csv"
+    if lower_path.endswith(".parquet"):
+        return "parquet", ".parquet"
+    if lower_path.endswith(".zip"):
+        return "zip_csv", ".zip"
+    return "unknown", Path(relative_path).suffix.lower()
+
+
+def derive_collection_group_key(relative_path: str, fmt: str) -> tuple[str, str, str] | None:
+    if fmt not in {"csv", "csv_gz", "zip_csv"}:
+        return None
+    path = Path(relative_path)
+    normalized_stem = normalize_partition_stem(path.name, data_asset_extension_for_format(fmt))
+    if not normalized_stem:
+        return None
+    parent = str(path.parent).replace("\\", "/")
+    parent = parent if parent not in {"", "."} else "."
+    return parent, fmt, normalized_stem
+
+
+def normalize_partition_stem(filename: str, extension: str) -> str:
+    lower_name = filename.lower()
+    if extension and lower_name.endswith(extension):
+        stem = filename[: -len(extension)]
+    else:
+        stem = Path(filename).stem
+    original = stem
+    stem = CSV_COLLECTION_DATE_RE.sub("_", stem)
+    stem = CSV_COLLECTION_TOKEN_RE.sub("", stem)
+    stem = CSV_COLLECTION_COUNTER_RE.sub("", stem)
+    stem = re.sub(r"[_\-.]+", "_", stem).strip("_.- ")
+    if not stem:
+        return ""
+    if stem == original and len(re.findall(r"\d{4,}", original)) < 2:
+        return ""
+    return stem.lower()
+
+
+def data_asset_extension_for_format(fmt: str) -> str:
+    return {
+        "csv": ".csv",
+        "csv_gz": ".csv.gz",
+        "parquet": ".parquet",
+        "zip_csv": ".zip",
+    }.get(fmt, "")
 
 
 def enrich_sql_orm_hint_evidence(

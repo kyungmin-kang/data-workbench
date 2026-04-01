@@ -1217,12 +1217,15 @@ paths:
         self.assertEqual(response.status_code, 200)
         payload = response.json()["project_profile"]
         self.assertEqual(payload["root"], str(self.root))
+        self.assertEqual(payload["summary"]["profiling_mode"], "metadata_only")
+        self.assertEqual(payload["cache"]["profiling_mode"], "metadata_only")
         self.assertGreaterEqual(payload["summary"]["data_assets"], 1)
         self.assertGreaterEqual(payload["summary"]["import_suggestions"], 1)
         self.assertGreaterEqual(payload["summary"]["api_contract_hints"], 1)
         self.assertGreaterEqual(payload["summary"]["ui_contract_hints"], 1)
         self.assertTrue(payload["data_assets"])
         self.assertTrue(payload["data_assets"][0]["suggested_import"])
+        self.assertEqual(payload["data_assets"][0]["profile_status"], "schema_only")
         self.assertTrue(payload["api_contract_hints"])
         self.assertTrue(payload["ui_contract_hints"])
 
@@ -1232,6 +1235,7 @@ paths:
             json={
                 "include_internal": False,
                 "root_path": str(self.root),
+                "profiling_mode": "metadata_only",
             },
         )
         self.assertEqual(response.status_code, 200)
@@ -1646,18 +1650,121 @@ def token_scan_two():
         self.assertEqual(grouped_asset["format"], "parquet_collection")
         self.assertEqual(grouped_asset["kind"], "glob")
         self.assertEqual(grouped_asset["profile_status"], "schema_only")
-        self.assertEqual(grouped_asset["profiling_skipped_reason"], "parquet_profiling_disabled")
+        self.assertEqual(grouped_asset["profiling_skipped_reason"], "metadata_only")
+        self.assertEqual(grouped_asset["member_count"], 2)
         self.assertEqual(grouped_asset["suggested_import"]["raw_asset_kind"], "glob")
         self.assertEqual(grouped_asset["suggested_import"]["raw_asset_format"], "parquet_collection")
 
         with patch.dict(os.environ, {"WORKBENCH_PROJECT_PROFILE_ALLOW_PARQUET": "1"}, clear=False):
-            refreshed_response = self.client.get("/api/project/profile", params={"force_refresh": "true"})
+            refreshed_response = self.client.get(
+                "/api/project/profile",
+                params={"force_refresh": "true", "profiling_mode": "profile_assets"},
+            )
         self.assertEqual(refreshed_response.status_code, 200)
         refreshed_payload = refreshed_response.json()["project_profile"]
         refreshed_asset = next(
             asset for asset in refreshed_payload["data_assets"] if asset["path"] == "data/split_metrics/*.parquet"
         )
         self.assertEqual(refreshed_asset["row_count"], 3)
+
+    def test_project_profile_groups_partitioned_csv_collections(self) -> None:
+        monthly_dir = self.root / "data" / "monthly"
+        monthly_dir.mkdir(parents=True, exist_ok=True)
+        (monthly_dir / "sales_2024-01.csv").write_text("month,value\n2024-01,10\n", encoding="utf-8")
+        (monthly_dir / "sales_2024-02.csv").write_text("month,value\n2024-02,12\n", encoding="utf-8")
+        (monthly_dir / "customers.csv").write_text("id,name\n1,Ada\n", encoding="utf-8")
+
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        grouped_asset = next(asset for asset in payload["data_assets"] if asset["format"] == "csv_collection")
+
+        self.assertEqual(grouped_asset["path"], "data/monthly/sales*.csv")
+        self.assertEqual(grouped_asset["kind"], "glob")
+        self.assertEqual(grouped_asset["member_count"], 2)
+        self.assertEqual(grouped_asset["group_reason"], "normalized_partition_stem")
+        self.assertEqual(grouped_asset["profiling_skipped_reason"], "metadata_only")
+        self.assertEqual(grouped_asset["suggested_import"]["raw_asset_format"], "csv_collection")
+        individual_paths = {asset["path"] for asset in payload["data_assets"]}
+        self.assertIn("data/monthly/customers.csv", individual_paths)
+
+    def test_project_profile_endpoint_can_exclude_paths_per_request(self) -> None:
+        raw_dir = self.root / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / "excluded.csv").write_text("id,value\n1,2\n", encoding="utf-8")
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "serving.py").write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/per-request-exclude")
+def per_request_exclude():
+    return {"ok": True}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get(
+            "/api/project/profile",
+            params=[("include_internal", "false"), ("exclude_paths", "raw")],
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        asset_paths = {asset["path"] for asset in payload["data_assets"]}
+        self.assertNotIn("raw/excluded.csv", asset_paths)
+        self.assertTrue(payload["cache"]["exclude_paths"])
+
+    def test_project_asset_profile_job_profiles_selected_assets_on_demand(self) -> None:
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        asset = next(item for item in payload["data_assets"] if item["path"] == "data/demo/fred_home_price.csv")
+        self.assertEqual(asset["profile_status"], "schema_only")
+
+        create_response = self.client.post(
+            "/api/project/profile/assets/jobs",
+            json={
+                "root_path": str(self.root),
+                "include_internal": False,
+                "profile_token": payload["cache"]["token"],
+                "asset_paths": ["data/demo/fred_home_price.csv"],
+            },
+        )
+        self.assertEqual(create_response.status_code, 200)
+        job = self.wait_for_project_asset_profile_job(create_response.json()["job"]["job_id"])
+        self.assertEqual(job["status"], "completed")
+        profiled_asset = job["asset_profiles"][0]
+        self.assertEqual(profiled_asset["path"], "data/demo/fred_home_price.csv")
+        self.assertEqual(profiled_asset["profile_status"], "profiled")
+        self.assertEqual(profiled_asset["row_count"], 5)
+
+    def test_project_asset_profile_job_handles_asset_profile_errors_without_failing_job(self) -> None:
+        broken_zip = self.root / "data" / "broken_bundle.zip"
+        broken_zip.parent.mkdir(parents=True, exist_ok=True)
+        broken_zip.write_bytes(b"not-a-real-zip")
+
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+
+        create_response = self.client.post(
+            "/api/project/profile/assets/jobs",
+            json={
+                "root_path": str(self.root),
+                "include_internal": False,
+                "profile_token": payload["cache"]["token"],
+                "asset_paths": ["data/broken_bundle.zip"],
+            },
+        )
+        self.assertEqual(create_response.status_code, 200)
+        job = self.wait_for_project_asset_profile_job(create_response.json()["job"]["job_id"])
+        self.assertEqual(job["status"], "completed")
+        profiled_asset = job["asset_profiles"][0]
+        self.assertEqual(profiled_asset["profile_status"], "schema_only")
+        self.assertTrue(profiled_asset["error"])
 
     def test_import_project_hint_seeds_api_fields_and_bindings(self) -> None:
         backend_dir = self.root / "backend"

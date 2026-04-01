@@ -19,6 +19,10 @@ def build_agent_workflow(
     source_of_truth: dict[str, Any] | None = None,
     task_id: str = "",
     run_id: str = "",
+    bundle_id: str = "",
+    root_path: str = "",
+    doc_paths: list[str] | None = None,
+    selected_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_plan_state(plan_state, graph=graph)
     source_of_truth = source_of_truth or {}
@@ -47,7 +51,13 @@ def build_agent_workflow(
         decision=recommended_decision,
         run=resumable_run,
     )
-    recommended_bundle = _select_role_bundle(source_of_truth, role)
+    recommended_bundle = _select_role_bundle(source_of_truth, role, bundle_id=bundle_id)
+    scan_context = {
+        "bundle_id": bundle_id or (recommended_bundle or {}).get("bundle_id", ""),
+        "root_path": root_path,
+        "doc_paths": list(doc_paths or []),
+        "selected_paths": list(selected_paths or []),
+    }
 
     focus = _build_focus(
         contract=contract,
@@ -82,6 +92,7 @@ def build_agent_workflow(
         "recommended_decision": recommended_decision,
         "recommended_blocker": recommended_blocker,
         "recommended_bundle": recommended_bundle,
+        "scan_context": scan_context,
         "resumable_run": resumable_run,
         "starter_run": starter_run,
         "recommended_actions": _build_recommended_actions(
@@ -258,10 +269,14 @@ def _select_role_blocker(
     return None
 
 
-def _select_role_bundle(source_of_truth: dict[str, Any], role: str) -> dict[str, Any] | None:
+def _select_role_bundle(source_of_truth: dict[str, Any], role: str, *, bundle_id: str = "") -> dict[str, Any] | None:
     bundles = list(source_of_truth.get("open_bundles", []) or [])
     if not bundles:
         return None
+    if bundle_id:
+        explicit = next((bundle for bundle in bundles if bundle.get("bundle_id") == bundle_id), None)
+        if explicit is not None:
+            return explicit
     if role == "scout":
         return bundles[0]
     if role == "qa":

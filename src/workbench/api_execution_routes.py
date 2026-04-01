@@ -97,6 +97,10 @@ def launch_agent_contract_endpoint(contract_id: str, payload: AgentWorkflowLaunc
             source_of_truth=execution_payload["source_of_truth"],
             task_id=payload.task_id,
             run_id=payload.run_id,
+            bundle_id=payload.bundle_id,
+            root_path=payload.root_path,
+            doc_paths=payload.doc_paths,
+            selected_paths=payload.selected_paths,
         )
         agent_run, launch_mode = launch_agent_workflow_run(
             workflow=workflow,
@@ -121,6 +125,10 @@ def launch_agent_contract_endpoint(contract_id: str, payload: AgentWorkflowLaunc
             source_of_truth=refreshed["source_of_truth"],
             task_id=payload.task_id,
             run_id=agent_run.get("id", "") if launch_mode == "created" else payload.run_id,
+            bundle_id=payload.bundle_id or agent_run.get("bundle_id", ""),
+            root_path=payload.root_path,
+            doc_paths=payload.doc_paths,
+            selected_paths=payload.selected_paths,
         )
         return {
             "launch_mode": launch_mode,
