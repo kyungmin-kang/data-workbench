@@ -12,5 +12,6 @@ Data Workbench.pdf
 reasoned_units_page.pdf
 runtime/cache/*
 runtime/plans/*
+runtime/coordination/*
 !runtime/cache/.gitkeep
 !runtime/plans/.gitkeep
