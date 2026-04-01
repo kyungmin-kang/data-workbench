@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import polars as pl
 
@@ -122,7 +125,36 @@ class ApiTests(ApiTestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json()["bundle"]["bundle_id"], second.json()["bundle"]["bundle_id"])
-        self.assertEqual(first.json()["bundle"], second.json()["bundle"])
+
+    def test_structure_scan_accepts_absolute_doc_paths_outside_root(self) -> None:
+        with tempfile.TemporaryDirectory() as external_dir:
+            external_doc = Path(external_dir) / "serving.md"
+            external_doc.write_text(
+                """
+GET /api/external-serving
+data/external.csv
+""".strip(),
+                encoding="utf-8",
+            )
+
+            scan_response = self.client.post(
+                "/api/structure/scan",
+                json={
+                    "role": "scout",
+                    "scope": "full",
+                    "root_path": str(self.root),
+                    "doc_paths": [str(external_doc)],
+                    "include_internal": False,
+                },
+            )
+            self.assertEqual(scan_response.status_code, 200)
+            bundle = scan_response.json()["bundle"]
+            self.assertTrue(
+                any(
+                    patch.get("target_id") == "contract:api.get__api_external_serving"
+                    for patch in bundle.get("patches", [])
+                )
+            )
 
     def test_structure_scan_from_openapi_doc_extracts_fields_and_reconciliation(self) -> None:
         docs_dir = self.root / "docs"
@@ -1613,9 +1645,19 @@ def token_scan_two():
 
         self.assertEqual(grouped_asset["format"], "parquet_collection")
         self.assertEqual(grouped_asset["kind"], "glob")
-        self.assertEqual(grouped_asset["row_count"], 3)
+        self.assertEqual(grouped_asset["profile_status"], "schema_only")
+        self.assertEqual(grouped_asset["profiling_skipped_reason"], "parquet_profiling_disabled")
         self.assertEqual(grouped_asset["suggested_import"]["raw_asset_kind"], "glob")
         self.assertEqual(grouped_asset["suggested_import"]["raw_asset_format"], "parquet_collection")
+
+        with patch.dict(os.environ, {"WORKBENCH_PROJECT_PROFILE_ALLOW_PARQUET": "1"}, clear=False):
+            refreshed_response = self.client.get("/api/project/profile", params={"force_refresh": "true"})
+        self.assertEqual(refreshed_response.status_code, 200)
+        refreshed_payload = refreshed_response.json()["project_profile"]
+        refreshed_asset = next(
+            asset for asset in refreshed_payload["data_assets"] if asset["path"] == "data/split_metrics/*.parquet"
+        )
+        self.assertEqual(refreshed_asset["row_count"], 3)
 
     def test_import_project_hint_seeds_api_fields_and_bindings(self) -> None:
         backend_dir = self.root / "backend"

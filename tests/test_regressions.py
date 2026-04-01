@@ -140,6 +140,48 @@ def route_{index}():
             self.assertEqual(profile["summary"]["api_contract_hints"], len(profile["api_contract_hints"]))
             self.assertEqual(profile["summary"]["data_assets"], len(profile["data_assets"]))
 
+    def test_profile_project_can_exclude_heavy_subtrees_via_env(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            repo_root = Path(repo_dir)
+            backend_dir = repo_root / "backend"
+            backend_dir.mkdir(parents=True, exist_ok=True)
+            (backend_dir / "serving.py").write_text(
+                """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/serving")
+def serving():
+    return {"ok": True}
+""".strip(),
+                encoding="utf-8",
+            )
+            excluded_dir = repo_root / "raw"
+            excluded_dir.mkdir(parents=True, exist_ok=True)
+            (excluded_dir / "hidden.py").write_text(
+                """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/api/excluded")
+def excluded():
+    return {"ok": False}
+""".strip(),
+                encoding="utf-8",
+            )
+            (excluded_dir / "huge.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS": "raw"}, clear=False):
+                profile = profile_project(repo_root, include_internal=False)
+
+            routes = {hint["route"] for hint in profile["api_contract_hints"]}
+            asset_paths = {asset["path"] for asset in profile["data_assets"]}
+            self.assertIn("GET /api/serving", routes)
+            self.assertNotIn("GET /api/excluded", routes)
+            self.assertNotIn("raw/huge.csv", asset_paths)
+
     def test_validation_flags_invalid_compute_edge_mappings(self) -> None:
         graph = load_graph()
         edge = next(

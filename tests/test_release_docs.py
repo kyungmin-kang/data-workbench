@@ -99,6 +99,8 @@ class ReleaseReadinessFilesTests(unittest.TestCase):
     def test_docker_compose_and_env_example_support_documented_runtime(self) -> None:
         compose = DOCKER_COMPOSE_PATH.read_text(encoding="utf-8")
         env_example = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+        readme = README_PATH.read_text(encoding="utf-8")
+        operator = (REPO_ROOT / "docs" / "workbench_v1_operator_guide.md").read_text(encoding="utf-8")
 
         for service_name in ("app:", "worker:", "postgres:", "minio:"):
             self.assertIn(service_name, compose)
@@ -107,6 +109,13 @@ class ReleaseReadinessFilesTests(unittest.TestCase):
         self.assertIn("WORKBENCH_PERSISTENCE_BACKEND", env_example)
         self.assertIn("WORKBENCH_OBJECT_STORE_BACKEND", env_example)
         self.assertIn("WORKBENCH_MINIO_ENDPOINT", env_example)
+        self.assertIn("WORKBENCH_ROOT_DIR", env_example)
+        self.assertIn("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS", env_example)
+        self.assertIn("WORKBENCH_ROOT_DIR", readme)
+        self.assertIn("WORKBENCH_ROOT_DIR", operator)
+        self.assertIn("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS", readme)
+        self.assertIn("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS", operator)
+        self.assertIn(".data-workbench", readme)
 
     def test_release_checklist_covers_final_gates(self) -> None:
         checklist = RELEASE_CHECKLIST_PATH.read_text(encoding="utf-8")

@@ -22,7 +22,8 @@
 
 If you are not using Docker:
 
-1. `python -m venv .venv`
+1. `./scripts/bootstrap_venv.sh`
 2. `. .venv/bin/activate`
-3. `python -m pip install -e ".[e2e,persistence]"`
-4. `PYTHONPATH=src python -m workbench.app`
+3. `PYTHONPATH=src python -m workbench.app`
+
+The bootstrap script enforces Python 3.11+ and installs the contributor extras automatically.

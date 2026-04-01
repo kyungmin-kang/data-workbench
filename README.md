@@ -59,12 +59,67 @@ The default compose setup runs in `mirror` persistence mode:
 
 ### Local contributor path
 
+Preferred bootstrap:
+
 ```bash
-python -m venv .venv
+./scripts/bootstrap_venv.sh
+. .venv/bin/activate
+```
+
+The bootstrap script auto-selects Python 3.11+ and refuses older interpreters.
+
+Manual path if you prefer:
+
+```bash
+python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[e2e,persistence]"
 PYTHONPATH=src python -m workbench.app
+```
+
+## Using the workbench against another repo
+
+When you launch the app from the `data-workbench` repo, it stores canonical state under that repo by default. For real dogfooding, point the workbench state at a separate workspace root and point onboarding or profiling at the target project root.
+
+Recommended sidecar workspace:
+
+```bash
+WORKBENCH_ROOT_DIR=/home/you/projects/RealEstate/.data-workbench \
+PYTHONPATH=src python -m workbench.app
+```
+
+Then use the target repo as the onboarding/profile `root_path`, for example:
+
+```text
+/home/you/projects/RealEstate
+```
+
+This keeps the workbench's own `specs/` and `runtime/` state out of the `data-workbench` repo while still letting the app scan and model the external project.
+
+If you want the modeled project to own its workbench state directly, set:
+
+```bash
+WORKBENCH_ROOT_DIR=/home/you/projects/RealEstate
+```
+
+That will write `specs/` and `runtime/` inside the target repo itself.
+
+For large repos, project profiling now stays conservative by default:
+
+- parquet and parquet-collection assets are discovered, but not deeply profiled during the initial project survey
+- oversized local data assets are left as schema-only discovery entries instead of being eagerly read
+
+If you explicitly want deep parquet profiling during discovery, opt in with:
+
+```bash
+WORKBENCH_PROJECT_PROFILE_ALLOW_PARQUET=1
+```
+
+If a repo includes giant raw-data or ingestion trees that you do not want to scan during the first pass, exclude them explicitly:
+
+```bash
+WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS=raw,warehouse,tmp
 ```
 
 ## Demo walkthrough
@@ -88,6 +143,7 @@ The onboarding-specific walkthrough is in [`docs/onboarding_wizard_quickstart.md
 - The standalone app is the primary product; agent support is additive.
 - The API and truth-layer model are intentionally stabilizing now, not being reinvented during preview.
 - Contributions, issues, and sharp-edge reports are welcome, especially around real operator workflows.
+- For large repos, start with a serving-relevant subroot if a full-project profile is too heavy, then widen the model in later passes.
 
 ## Agent-enhanced use
 

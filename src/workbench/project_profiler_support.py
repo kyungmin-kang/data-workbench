@@ -39,6 +39,34 @@ DEFAULT_IGNORED_PARTS = {
 }
 
 
+def get_project_profile_exclusion_roots(root_dir: Path) -> list[Path]:
+    raw = (os.environ.get("WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS") or "").strip()
+    if not raw:
+        return []
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for entry in raw.replace("\n", ",").split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        path = (root_dir / path).resolve() if not path.is_absolute() else path.resolve()
+        normalized = str(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        roots.append(path)
+    return roots
+
+
+def project_profile_exclusion_signature(root_dir: Path) -> str:
+    roots = get_project_profile_exclusion_roots(root_dir)
+    if not roots:
+        return ""
+    payload = json.dumps(sorted(str(path) for path in roots))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def build_project_profile_cache_token(
     root_dir: Path,
     *,
@@ -50,6 +78,7 @@ def build_project_profile_cache_token(
             "root": str(root_dir.resolve()),
             "include_tests": include_tests,
             "include_internal": include_internal,
+            "exclude_signature": project_profile_exclusion_signature(root_dir),
             "version": PROJECT_PROFILE_CACHE_VERSION,
         },
         sort_keys=True,
@@ -102,6 +131,7 @@ def with_project_profile_cache_metadata(
         "cached": cached,
         "include_tests": include_tests if include_tests is not None else bool(existing_cache.get("include_tests", False)),
         "include_internal": include_internal if include_internal is not None else bool(existing_cache.get("include_internal", True)),
+        "exclude_signature": project_profile_exclusion_signature(Path(profile.get("root") or ".")),
         "version": PROJECT_PROFILE_CACHE_VERSION,
     }
     return profile
@@ -120,6 +150,7 @@ def profile_cache_matches(
     return (
         bool(cache.get("include_tests", False)) == include_tests
         and bool(cache.get("include_internal", True)) == include_internal
+        and str(cache.get("exclude_signature", "")) == project_profile_exclusion_signature(root_dir)
     )
 
 
@@ -135,15 +166,33 @@ def iter_project_files(
     is_test_path: Callable[[str], bool],
     is_internal_workbench_path: Callable[[str], bool],
 ):
+    excluded_roots = get_project_profile_exclusion_roots(root_dir)
+
+    def is_excluded(path: Path) -> bool:
+        resolved = path.resolve()
+        for excluded_root in excluded_roots:
+            try:
+                resolved.relative_to(excluded_root)
+                return True
+            except ValueError:
+                continue
+        return False
+
     for current_root, dirnames, filenames in os.walk(root_dir):
+        current_root_path = Path(current_root)
+        if is_excluded(current_root_path):
+            dirnames[:] = []
+            continue
         dirnames[:] = sorted(
             dirname
             for dirname in dirnames
             if not is_ignored_project_dir_name(dirname)
+            and not is_excluded(current_root_path / dirname)
         )
-        current_root_path = Path(current_root)
         for filename in sorted(filenames):
             path = current_root_path / filename
+            if is_excluded(path):
+                continue
             relative = path.relative_to(root_dir).as_posix()
             if not include_tests and is_test_path(relative):
                 continue

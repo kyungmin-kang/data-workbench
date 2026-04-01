@@ -34,12 +34,12 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 ### Local contributor path
 
 ```bash
-python -m venv .venv
+./scripts/bootstrap_venv.sh
 . .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[e2e,persistence]"
 PYTHONPATH=src python -m workbench.app
 ```
+
+The bootstrap script enforces Python 3.11+ so local setup does not silently fall back to an unsupported interpreter.
 
 ## Working Agreement
 

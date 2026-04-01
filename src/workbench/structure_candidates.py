@@ -191,7 +191,7 @@ def collect_document_candidates(root_dir: Path, doc_paths: list[str]) -> list[di
                     "import_spec": {
                         "source_label": Path(asset_path).stem.replace("_", " ").title(),
                         "source_extension_type": "disk_path",
-                        "source_description": f"Imported from {path.relative_to(root_dir)}",
+                        "source_description": f"Imported from {describe_doc_source_path(path, root_dir)}",
                         "source_provider": "local",
                         "source_refresh": "",
                         "source_origin_kind": "disk_path",
@@ -204,7 +204,7 @@ def collect_document_candidates(root_dir: Path, doc_paths: list[str]) -> list[di
                         "profile_ready": False,
                         "data_label": Path(asset_path).stem.replace("_", " ").title(),
                         "data_extension_type": "raw_dataset",
-                        "data_description": f"Imported from {path.relative_to(root_dir)}",
+                        "data_description": f"Imported from {describe_doc_source_path(path, root_dir)}",
                         "update_frequency": "",
                         "persistence": "cold",
                         "persisted": False,
@@ -213,6 +213,13 @@ def collect_document_candidates(root_dir: Path, doc_paths: list[str]) -> list[di
                 }
             )
     return candidates
+
+
+def describe_doc_source_path(path: Path, root_dir: Path) -> str:
+    try:
+        return str(path.relative_to(root_dir))
+    except ValueError:
+        return str(path)
 
 
 def resolve_doc_path(root_dir: Path, entry: str) -> Path:

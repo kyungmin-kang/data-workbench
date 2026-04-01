@@ -41,11 +41,36 @@ docker compose up --build
 ### Local contributor
 
 ```bash
-python -m venv .venv
+./scripts/bootstrap_venv.sh
 . .venv/bin/activate
-python -m pip install -e ".[e2e,persistence]"
 PYTHONPATH=src python -m workbench.app
 ```
+
+## Modeling another repo
+
+The app stores canonical graph, `plan_state`, and latest-plan artifacts under `WORKBENCH_ROOT_DIR`. If you launch from the `data-workbench` repo without overriding that variable, state will be written under this repo's own `specs/` and `runtime/` directories.
+
+For a real external project, use one of these patterns:
+
+- Sidecar workspace root: set `WORKBENCH_ROOT_DIR=/path/to/target/.data-workbench` and use `/path/to/target` as the onboarding or profiling `root_path`.
+- In-repo workspace root: set `WORKBENCH_ROOT_DIR=/path/to/target` if you want `specs/` and `runtime/` checked into the modeled repo itself.
+
+Recommended first dogfood loop for a large external repo:
+
+1. Start the workbench with a sidecar workspace root.
+2. Run project profiling against the target repo or a serving-relevant subroot.
+3. Bootstrap the graph from the highest-signal backend/API/docs inputs first.
+4. Save the graph and inspect the latest plan.
+5. Add execution tasks, blockers, and decisions before widening the scan scope.
+
+Project profiling is intentionally conservative for large repos:
+
+- parquet-style assets are discovered but not deeply profiled by default
+- oversized local assets stay schema-only during the first survey pass
+
+If you need deep parquet profiling during discovery, start the app with `WORKBENCH_PROJECT_PROFILE_ALLOW_PARQUET=1`.
+
+If a repo has giant raw-data or ingestion trees, exclude them during the first pass with `WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS`, for example `WORKBENCH_PROJECT_PROFILE_EXCLUDE_PATHS=raw,warehouse,tmp`.
 
 ## Execution panel quick actions
 

@@ -4,6 +4,7 @@ import ast
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 import threading
@@ -80,6 +81,7 @@ PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL = 200
 PROJECT_PROFILE_JOB_TTL_SECONDS = 60 * 60
 PROJECT_PROFILE_JOBS: dict[str, dict[str, Any]] = {}
 PROJECT_PROFILE_JOBS_LOCK = threading.Lock()
+DEFAULT_PROJECT_PROFILE_MAX_ASSET_BYTES = 16 * 1024 * 1024
 
 
 def profile_project(
@@ -3483,19 +3485,68 @@ def summarize_asset_entry(root_dir: Path, entry: dict[str, str | None]) -> dict:
         "columns": [],
     }
     if asset and asset.get("accessible"):
-        try:
-            profile = profile_asset(asset, root_dir)
-        except Exception as error:  # noqa: BLE001
-            summary["error"] = str(error)
+        skip_reason = should_skip_asset_profiling(asset)
+        if skip_reason:
+            summary["profiling_skipped_reason"] = skip_reason
         else:
-            summary["profile_status"] = profile["profile_status"]
-            summary["row_count"] = profile["row_count"]
-            summary["columns"] = [
-                {"name": column["name"], "data_type": column["data_type"]}
-                for column in profile["columns"]
-            ]
+            try:
+                profile = profile_asset(asset, root_dir)
+            except Exception as error:  # noqa: BLE001
+                summary["error"] = str(error)
+            else:
+                summary["profile_status"] = profile["profile_status"]
+                summary["row_count"] = profile["row_count"]
+                summary["columns"] = [
+                    {"name": column["name"], "data_type": column["data_type"]}
+                    for column in profile["columns"]
+                ]
     summary["suggested_import"] = build_import_suggestion(summary)
     return summary
+
+
+def should_skip_asset_profiling(asset: dict[str, Any]) -> str | None:
+    fmt = str(asset.get("format") or "unknown")
+    if fmt in {"parquet", "parquet_collection"} and not project_profile_parquet_profiling_enabled():
+        return "parquet_profiling_disabled"
+
+    estimated_bytes = estimate_asset_size_bytes(asset)
+    max_bytes = project_profile_max_asset_bytes()
+    if estimated_bytes is not None and estimated_bytes > max_bytes:
+        return f"asset_too_large:{estimated_bytes}"
+    return None
+
+
+def project_profile_parquet_profiling_enabled() -> bool:
+    return (os.environ.get("WORKBENCH_PROJECT_PROFILE_ALLOW_PARQUET") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def project_profile_max_asset_bytes() -> int:
+    raw = (os.environ.get("WORKBENCH_PROJECT_PROFILE_MAX_ASSET_BYTES") or "").strip()
+    if not raw:
+        return DEFAULT_PROJECT_PROFILE_MAX_ASSET_BYTES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_PROJECT_PROFILE_MAX_ASSET_BYTES
+
+
+def estimate_asset_size_bytes(asset: dict[str, Any]) -> int | None:
+    try:
+        if asset.get("kind") in {"glob", "directory"}:
+            paths = asset.get("paths", []) or []
+            sizes = [path.stat().st_size for path in paths if path.exists()]
+            return sum(sizes) if sizes else None
+        path = asset.get("path")
+        if path and path.exists():
+            return path.stat().st_size
+    except OSError:
+        return None
+    return None
 
 
 def build_import_suggestion(asset_summary: dict) -> dict:
