@@ -6,6 +6,8 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY static ./static
 COPY specs ./specs
+COPY docs ./docs
+COPY examples ./examples
 COPY runtime ./runtime
 COPY data ./data
 

@@ -44,6 +44,44 @@ body {
   flex-direction: column;
 }
 
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.toast-card {
+  width: min(360px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.94);
+  color: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast-card.exiting {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.toast-title {
+  font-weight: 600;
+}
+
+.toast-subtitle {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  color: rgba(226, 232, 240, 0.92);
+}
+
 .shell.graph-fullscreen {
   height: 100vh;
   overflow: hidden;
@@ -1481,6 +1519,27 @@ button.danger-soft {
   border-top: 1px solid rgba(31, 26, 23, 0.08);
 }
 
+.discovery-progress-card {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(79, 70, 229, 0.18);
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.1), rgba(37, 99, 235, 0.08));
+}
+
+.discovery-progress-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.loading-emoji {
+  display: inline-flex;
+  font-size: 1.15rem;
+  line-height: 1;
+  animation: loading-bob 1.1s ease-in-out infinite;
+}
+
 .section h3 {
   margin-bottom: 8px;
   font-size: 1rem;
@@ -1663,6 +1722,88 @@ button.danger-soft {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 6px;
+}
+
+.execution-editor-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.execution-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.execution-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.execution-editor-field.execution-editor-checkbox {
+  justify-content: flex-end;
+  color: var(--text);
+}
+
+.execution-editor-field.execution-editor-checkbox input {
+  margin-right: 6px;
+}
+
+.execution-editor-field.execution-editor-textarea {
+  margin-top: 2px;
+}
+
+.execution-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.execution-editor-events {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.execution-editor-events ul {
+  margin: 6px 0 0 18px;
+}
+
+.execution-editor-card details {
+  margin-top: 6px;
+}
+
+.execution-editor-card summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.execution-lane-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.execution-lane-card {
+  min-height: 100%;
+}
+
+.execution-brief-card {
+  gap: 12px;
+}
+
+.execution-brief-prompt {
+  margin: 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(31, 26, 23, 0.05);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+  white-space: pre-wrap;
+  font: 0.84rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  color: var(--text);
 }
 
 .tag-chip {
@@ -2195,6 +2336,12 @@ textarea {
   text-overflow: ellipsis;
 }
 
+.artifact-help {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(31, 26, 23, 0.08);
+}
+
 .edge-line {
   stroke: rgba(31, 26, 23, 0.25);
   stroke-width: 2;
@@ -2224,6 +2371,16 @@ textarea {
 .hint {
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+@keyframes loading-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
 }
 
 @media (max-width: 920px) {

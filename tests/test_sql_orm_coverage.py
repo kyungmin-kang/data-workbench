@@ -1,43 +1,20 @@
 from __future__ import annotations
 
-import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from workbench.app import app
-from workbench.store import ROOT_DIR
+from tests.workbench_test_support import WorkbenchTempRootMixin
 
 
-class SqlOrmCoverageTests(unittest.TestCase):
+class SqlOrmCoverageTests(WorkbenchTempRootMixin, unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        shutil.copytree(ROOT_DIR / "data", self.root / "data")
-        shutil.copytree(ROOT_DIR / "specs", self.root / "specs")
-        shutil.copytree(ROOT_DIR / "src", self.root / "src")
-        shutil.copytree(ROOT_DIR / "static", self.root / "static")
-        if (ROOT_DIR / "docs").exists():
-            shutil.copytree(ROOT_DIR / "docs", self.root / "docs")
-        for filename in ("pyproject.toml", "docker-compose.yml", "Dockerfile"):
-            source = ROOT_DIR / filename
-            if source.exists():
-                shutil.copy2(source, self.root / filename)
-        (self.root / "runtime" / "plans").mkdir(parents=True, exist_ok=True)
-        (self.root / "runtime" / "cache").mkdir(parents=True, exist_ok=True)
-        self.previous_root = os.environ.get("WORKBENCH_ROOT_DIR")
-        os.environ["WORKBENCH_ROOT_DIR"] = str(self.root)
+        self.setUpWorkbenchRoot()
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
-        if self.previous_root is None:
-            os.environ.pop("WORKBENCH_ROOT_DIR", None)
-        else:
-            os.environ["WORKBENCH_ROOT_DIR"] = self.previous_root
-        self.temp_dir.cleanup()
+        self.tearDownWorkbenchRoot()
 
     def test_project_profile_infers_sql_cte_join_lineage_and_ambiguity(self) -> None:
         sql_dir = self.root / "sql"

@@ -1,0 +1,20 @@
+{
+  "name": "local-workbench",
+  "interface": {
+    "displayName": "Local Workbench Plugins"
+  },
+  "plugins": [
+    {
+      "name": "data-workbench",
+      "source": {
+        "source": "local",
+        "path": "./plugins/data-workbench"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

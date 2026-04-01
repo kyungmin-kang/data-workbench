@@ -1,80 +1,190 @@
 # Data Workbench
 
-Internal, spec-first data workbench for modeling sources, datasets, transforms, models, API contracts, and UI dependencies in one graph.
+A graphical source of truth for data structure and flow across assets, transforms, APIs, and UI consumers. Data Workbench helps humans and agents coordinate implementation against the same model, compare intended versus observed changes, and keep execution work tied to the architecture it is supposed to implement.
 
-## What is implemented
+It extends the usefulness of an ER diagram by linking structure, execution, review, and implementation evidence in one place. It can be used as a standalone workbench or as the shared control plane for development with agents.
 
-- One canonical graph spec with 4 base node types: `source`, `data`, `compute`, and `contract`
-- Multiple filtered graph views: Data, Contract, UI Dependency, and Impact
-- Column-level lineage via edge mappings and contract field bindings
-- Quick profiling for accessible datasets via `polars`
-- `save -> plan` flow that writes deterministic machine-readable and human-readable diff artifacts
-- Browser UI for graph browsing, note editing, node dragging, view switching, profile refresh, and plan inspection
-- Docker Compose setup with app, worker, Postgres, and MinIO services
+## What the workbench does
 
-## Run locally
+- provides a graphical map of sources, data assets, compute steps, APIs, and UI dependencies
+- treats that map as shared truth for both humans and agents
+- imports hints from project scans, planning docs, SQL, ORM code, and API code
+- saves deterministic latest-plan artifacts after graph changes
+- reconciles intended structure versus observed implementation through bundles, contradictions, review, rebase, and merge
+- tracks decisions, tasks, blockers, evidence, and agent runs in `plan_state`
+- exposes agent-friendly assignment briefs and workflow recommendations without making agents mandatory
+
+The core truth model is:
+
+- `graph` = structural truth
+- bundles and review = proposal truth
+- `plan_state` = execution truth
+
+## Preview status
+
+This repo is being shared publicly now as a **usable preview** ahead of the formal `0.2.0` GitHub release.
+
+Right now, the expectation is:
+
+- core workflows should already be usable in real projects
+- the repo should already be understandable and contributor-friendly
+- a short dogfood period will confirm the intended loop before the formal release tag
+- smaller ergonomics and edge-case fixes may still land quickly during preview
+
+## Quickstart
+
+### Docker-first
+
+This is the default path for running the project from a clean clone.
 
 ```bash
-python -m venv .venv
-python -m pip install -e .
-PYTHONPATH=src python -m workbench.app
-```
-
-Then open [http://localhost:8000](http://localhost:8000).
-
-## Run with Docker Compose
-
-```bash
+cp .env.example .env
 docker compose up --build
 ```
 
-The app is available at `http://localhost:8000`.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-Compose now runs the app and worker in `mirror` persistence mode:
+Included services:
 
-- canonical graph state, bundles, plans, and onboarding presets are mirrored into Postgres
-- local YAML and JSON artifacts are still written under `specs/` and `runtime/` for easy inspection
-- plan artifacts, bundle YAML, graph snapshots, and preset payloads are also mirrored into MinIO object storage
+- app
+- worker
+- Postgres
+- MinIO
 
-## Discovery workflow
+The default compose setup runs in `mirror` persistence mode:
 
-Project discovery now caches a full scan per root and scope combination. The onboarding wizard reuses that cached profile for hint import and bootstrap, and `Rescan project` forces a fresh crawl when you want to invalidate the cache after repo changes.
+- local artifacts still land under `specs/` and `runtime/`
+- canonical graph state and execution state can be mirrored to Postgres
+- plan artifacts and bundle artifacts can be mirrored to MinIO
 
-## Test
+### Local contributor path
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[e2e,persistence]"
+PYTHONPATH=src python -m workbench.app
+```
+
+## Demo walkthrough
+
+Use the onboarding demo under [`examples/onboarding_wizard_demo/README.md`](examples/onboarding_wizard_demo/README.md).
+
+Recommended first loop:
+
+1. Start the app with Docker Compose.
+2. Run onboarding against `examples/onboarding_wizard_demo/`.
+3. Bootstrap the graph and save it.
+4. Inspect the latest plan.
+5. Add or derive execution tasks.
+6. Run a structure scan and review any proposed changes.
+
+The onboarding-specific walkthrough is in [`docs/onboarding_wizard_quickstart.md`](docs/onboarding_wizard_quickstart.md).
+
+## What to expect in preview
+
+- The Docker-first path is the main supported way to run the workbench right now.
+- The standalone app is the primary product; agent support is additive.
+- The API and truth-layer model are intentionally stabilizing now, not being reinvented during preview.
+- Contributions, issues, and sharp-edge reports are welcome, especially around real operator workflows.
+
+## Agent-enhanced use
+
+The workbench is usable without agents. When you do use agents, the intended read path is:
+
+- `/api/source-of-truth`
+- `/api/agent-contracts`
+- `/api/agent-contracts/{id}/brief`
+- `/api/agent-contracts/{id}/workflow`
+- `/api/agent-contracts/{id}/launch`
+
+Agents should update execution state, open scans, and participate in review, but they should not mutate canonical structure directly.
+
+See [`docs/workbench_v1_operator_guide.md`](docs/workbench_v1_operator_guide.md) for the day-to-day human and agent operating loop.
+
+## Current preview support surface
+
+These are the backend surfaces we currently expect to carry into the formal `0.2.0` release:
+
+- `/api/source-of-truth`
+- `/api/plan-state`
+- `/api/agent-contracts`
+- `/api/agent-contracts/{id}/brief`
+- `/api/agent-contracts/{id}/workflow`
+- `/api/agent-contracts/{id}/launch`
+- structure scan, review, rebase, and merge endpoints
+
+Current supported runtime modes:
+
+- Docker Compose: primary
+- local Python: contributor path
+
+Current first-class tested local platforms:
+
+- macOS
+- Linux
+
+Windows may work through Docker Desktop, but it is not yet an officially tested or supported path for this preview. The `supported_platforms` contract field should be read as the first-class platforms we currently test and stand behind.
+
+## Optional Codex plugin scaffold
+
+For local dogfooding with Codex, this repo now includes a minimal plugin scaffold:
+
+- marketplace: [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json)
+- plugin manifest: [`plugins/data-workbench/.codex-plugin/plugin.json`](plugins/data-workbench/.codex-plugin/plugin.json)
+- skills:
+  - [`plugins/data-workbench/skills/workbench-architect/SKILL.md`](plugins/data-workbench/skills/workbench-architect/SKILL.md)
+  - [`plugins/data-workbench/skills/workbench-scout/SKILL.md`](plugins/data-workbench/skills/workbench-scout/SKILL.md)
+  - [`plugins/data-workbench/skills/workbench-builder/SKILL.md`](plugins/data-workbench/skills/workbench-builder/SKILL.md)
+  - [`plugins/data-workbench/skills/workbench-qa/SKILL.md`](plugins/data-workbench/skills/workbench-qa/SKILL.md)
+
+This plugin track is optional during preview. The app remains fully usable without it.
+
+## Tests
+
+Default suite:
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
 ```
 
-## Browser E2E
-
-The browser coverage is optional and now works with the current interpreter, a repo-local virtualenv, or an explicit override.
+Browser E2E:
 
 ```bash
 python -m pip install -e ".[e2e]"
-python -m playwright install chromium
+PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers python -m playwright install chromium
 PYTHONPATH=src python -m unittest discover -s tests -p 'test_e2e_browser.py'
 ```
 
-Optional overrides:
+Persistence integration:
 
-- `WORKBENCH_E2E_PYTHON` to point the harness at a specific Python executable
-- `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to point Playwright at a system Chromium or Chrome install
-- `PLAYWRIGHT_CHROMIUM_CHANNEL` to launch a branded browser channel such as `chrome` or `msedge`
+```bash
+python -m pip install -e ".[persistence]"
+PYTHONPATH=src WORKBENCH_RUN_PERSISTENCE_INTEGRATION=1 python -m unittest discover -s tests -p 'test_persistence_integration.py'
+```
 
 ## CI
 
-GitHub Actions now runs three lanes on every push and pull request:
+GitHub Actions currently runs:
 
-- the default unittest suite plus a Python compile check
-- a dedicated browser E2E job on Ubuntu with Playwright Chromium installed
-- a persistence integration job that brings up Postgres and MinIO, then exercises the real persistence backends end-to-end
+- unit tests plus Python compile checks
+- Docker smoke
+- browser E2E with Playwright Chromium
+- persistence integration against Postgres and MinIO
 
-## Why these dependencies
+## Docs
 
-The workbench now uses a small high-leverage dependency set:
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/workbench_v1_operator_guide.md`](docs/workbench_v1_operator_guide.md)
+- [`docs/onboarding_wizard_quickstart.md`](docs/onboarding_wizard_quickstart.md)
+- [`docs/release_notes_0_2_0.md`](docs/release_notes_0_2_0.md)
+- [`docs/release_checklist_0_2_0.md`](docs/release_checklist_0_2_0.md)
+- [`docs/shipping_plan.md`](docs/shipping_plan.md)
+- [`docs/shipping_tasks.md`](docs/shipping_tasks.md)
 
-- `FastAPI` for a cleaner local API surface and better future extensibility
-- `Pydantic` for typed graph/spec validation instead of hand-rolled schema checks
-- `polars` for faster dataset profiling and a stronger path toward larger data assets
-- `uvicorn` for a durable local app server
+The release notes and checklist docs describe the planned formal `0.2.0` release after the current preview dogfood period.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -1,0 +1,30 @@
+{
+  "name": "data-workbench",
+  "version": "0.2.0",
+  "description": "Codex plugin scaffold for the local-first Data Workbench.",
+  "license": "Apache-2.0",
+  "keywords": [
+    "data-workbench",
+    "architecture",
+    "execution",
+    "review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Data Workbench",
+    "shortDescription": "Run the workbench with Architect, Scout, Builder, and QA skills.",
+    "longDescription": "Repo-local Codex plugin scaffold for the Data Workbench. It wraps the workbench's stable source-of-truth, plan-state, and review APIs and points each skill back to the checked-in playbooks.",
+    "developerName": "Local Workbench",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Read /api/source-of-truth and tell me the next best task.",
+      "Use the builder workflow to resume the top open task.",
+      "Scan for drift and summarize the highest-risk contradiction."
+    ],
+    "brandColor": "#0b7285"
+  }
+}

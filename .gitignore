@@ -5,6 +5,11 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .playwright-browsers/
+.env
+.env.*
+!.env.example
+Data Workbench.pdf
+reasoned_units_page.pdf
 runtime/cache/*
 runtime/plans/*
 !runtime/cache/.gitkeep

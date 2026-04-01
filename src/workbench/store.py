@@ -11,12 +11,15 @@ from typing import Any
 
 import yaml
 
-from .types import PATCH_TYPE_PRECEDENCE, ScanBundle, normalize_graph
+from .execution import load_or_build_plan_state
+from .types import PATCH_TYPE_PRECEDENCE, PlanState, ScanBundle, normalize_graph, normalize_plan_state
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 GRAPH_JSON_KEY = "graphs/current.json"
 GRAPH_YAML_KEY = "graphs/current.yaml"
+PLAN_STATE_JSON_KEY = "plan_state/current.json"
+PLAN_STATE_YAML_KEY = "plan_state/current.yaml"
 LATEST_PLAN_JSON_KEY = "plans/latest.plan.json"
 LATEST_PLAN_MARKDOWN_KEY = "plans/latest.plan.md"
 LATEST_PLAN_ARTIFACTS_KEY = "plans/latest.artifacts.json"
@@ -177,6 +180,10 @@ def get_spec_path() -> Path:
     return get_structure_dir() / "spec.yaml"
 
 
+def get_plan_state_path() -> Path:
+    return get_structure_dir() / "plan_state.yaml"
+
+
 def get_legacy_spec_path() -> Path:
     return get_root_dir() / "specs" / "workbench.graph.json"
 
@@ -269,6 +276,45 @@ def object_store_uri(key: str) -> str:
     return f"minio://{bucket_name}/{storage_key(key)}"
 
 
+def describe_artifact_storage() -> dict[str, Any]:
+    object_store_backend = (os.environ.get("WORKBENCH_OBJECT_STORE_BACKEND") or "").strip().lower()
+    object_store = {
+        "enabled": object_store_enabled(),
+        "backend": object_store_backend or "",
+        "uri_scheme": "minio" if object_store_backend in {"minio", "mirror"} else "",
+        "endpoint": (os.environ.get("WORKBENCH_MINIO_ENDPOINT") or "").strip(),
+        "bucket": (os.environ.get("WORKBENCH_MINIO_BUCKET") or "").strip(),
+        "secure": (os.environ.get("WORKBENCH_MINIO_SECURE") or "0").strip() not in {"0", "false", "False"},
+        "prefix": get_persistence_prefix(),
+        "config_env_vars": [
+            "WORKBENCH_OBJECT_STORE_BACKEND",
+            "WORKBENCH_MINIO_ENDPOINT",
+            "WORKBENCH_MINIO_BUCKET",
+            "WORKBENCH_MINIO_SECURE",
+            "WORKBENCH_PERSISTENCE_PREFIX",
+        ],
+        "credential_env_vars": [
+            "WORKBENCH_MINIO_ACCESS_KEY",
+            "WORKBENCH_MINIO_SECRET_KEY",
+        ],
+        "update_hint": "",
+    }
+    if object_store["enabled"]:
+        object_store["update_hint"] = (
+            "Update the object-storage env vars on the app and worker, then restart those services so new remote artifact URIs use the new endpoint, bucket, prefix, or credentials."
+        )
+    else:
+        object_store["update_hint"] = (
+            "Set WORKBENCH_OBJECT_STORE_BACKEND=minio plus the MinIO endpoint, bucket, and credential env vars to enable remote artifact URIs."
+        )
+    return {
+        "persistence_backend": get_persistence_backend(),
+        "local_enabled": local_persistence_enabled(),
+        "postgres_enabled": postgres_persistence_enabled(),
+        "object_store": object_store,
+    }
+
+
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -290,6 +336,29 @@ def load_graph(path: Path | None = None) -> dict[str, Any]:
     if object_store_enabled() and _local_graph_exists():
         _persist_graph_object_store(graph)
     return graph
+
+
+def load_plan_state(
+    graph: dict[str, Any] | None = None,
+    *,
+    path: Path | None = None,
+    bridge_if_missing: bool = True,
+) -> dict[str, Any]:
+    persisted: dict[str, Any] | None = None
+    if path is not None:
+        persisted = _load_plan_state_local(path)
+    else:
+        if postgres_persistence_enabled():
+            persisted = _load_plan_state_postgres()
+        if persisted is None and object_store_enabled():
+            persisted = _load_plan_state_object_store()
+        if persisted is None:
+            persisted = _load_plan_state_local()
+    if persisted is not None:
+        return normalize_plan_state(persisted, graph=graph)
+    if bridge_if_missing and graph is not None:
+        return load_or_build_plan_state(graph, None)
+    return normalize_plan_state({}, graph=graph)
 
 
 def _load_graph_local(path: Path | None = None) -> dict[str, Any]:
@@ -317,6 +386,19 @@ def _load_graph_local(path: Path | None = None) -> dict[str, Any]:
     return normalize_graph({})
 
 
+def _load_plan_state_local(path: Path | None = None) -> dict[str, Any] | None:
+    path = path or get_plan_state_path()
+    if not path.exists():
+        return None
+    if path.suffix in {".yaml", ".yml"}:
+        with path.open(encoding="utf-8") as file:
+            payload = yaml.safe_load(file) or {}
+    else:
+        with path.open(encoding="utf-8") as file:
+            payload = json.load(file)
+    return normalize_plan_state(payload)
+
+
 def _load_graph_postgres() -> dict[str, Any] | None:
     store = _get_postgres_document_store()
     json_text = store.read_text(storage_key(GRAPH_JSON_KEY))
@@ -328,6 +410,17 @@ def _load_graph_postgres() -> dict[str, Any] | None:
     return None
 
 
+def _load_plan_state_postgres() -> dict[str, Any] | None:
+    store = _get_postgres_document_store()
+    json_text = store.read_text(storage_key(PLAN_STATE_JSON_KEY))
+    if json_text:
+        return normalize_plan_state(json.loads(json_text))
+    yaml_text = store.read_text(storage_key(PLAN_STATE_YAML_KEY))
+    if yaml_text:
+        return normalize_plan_state(yaml.safe_load(yaml_text) or {})
+    return None
+
+
 def _load_graph_object_store() -> dict[str, Any] | None:
     store = _get_object_store()
     json_text = store.read_text(storage_key(GRAPH_JSON_KEY))
@@ -336,6 +429,17 @@ def _load_graph_object_store() -> dict[str, Any] | None:
     yaml_text = store.read_text(storage_key(GRAPH_YAML_KEY))
     if yaml_text:
         return normalize_graph(yaml.safe_load(yaml_text) or {})
+    return None
+
+
+def _load_plan_state_object_store() -> dict[str, Any] | None:
+    store = _get_object_store()
+    json_text = store.read_text(storage_key(PLAN_STATE_JSON_KEY))
+    if json_text:
+        return normalize_plan_state(json.loads(json_text))
+    yaml_text = store.read_text(storage_key(PLAN_STATE_YAML_KEY))
+    if yaml_text:
+        return normalize_plan_state(yaml.safe_load(yaml_text) or {})
     return None
 
 
@@ -363,6 +467,35 @@ def save_graph(
     if path is None and object_store_enabled():
         _persist_graph_object_store(graph)
     return graph
+
+
+def save_plan_state(
+    plan_state: dict[str, Any] | PlanState,
+    *,
+    graph: dict[str, Any] | None = None,
+    path: Path | None = None,
+    updated_by: str = "user",
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_plan_state(plan_state, graph=graph)
+    if expected_revision is None:
+        raise ValueError("expected_revision is required for plan_state writes.")
+    current = load_plan_state(graph=graph, path=path, bridge_if_missing=False)
+    current_revision = int(current.get("revision") or 0)
+    if expected_revision != current_revision:
+        raise ValueError(f"plan_state revision mismatch: expected {expected_revision}, current {current_revision}.")
+    normalized["revision"] = current_revision + 1
+    normalized["updated_at"] = utc_timestamp()
+    normalized["updated_by"] = updated_by
+
+    target_path = path or get_plan_state_path()
+    if path is not None or local_persistence_enabled():
+        _write_plan_state_local(normalized, target_path)
+    if path is None and postgres_persistence_enabled():
+        _persist_plan_state_postgres(normalized)
+    if path is None and object_store_enabled():
+        _persist_plan_state_object_store(normalized)
+    return normalized
 
 
 def canonical_yaml_payload(graph: dict[str, Any]) -> dict[str, Any]:
@@ -642,6 +775,10 @@ def _canonical_yaml_text(graph: dict[str, Any]) -> str:
     return yaml.safe_dump(canonical_yaml_payload(graph), sort_keys=False, allow_unicode=False, width=120)
 
 
+def _plan_state_yaml_text(plan_state: dict[str, Any]) -> str:
+    return yaml.safe_dump(plan_state, sort_keys=False, allow_unicode=False, width=120)
+
+
 def _write_graph_local(graph: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
@@ -653,16 +790,42 @@ def _write_graph_local(graph: dict[str, Any], path: Path) -> None:
         file.write("\n")
 
 
+def _write_plan_state_local(plan_state: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        file.write(_plan_state_yaml_text(plan_state))
+
+
 def _persist_graph_postgres(graph: dict[str, Any]) -> None:
     store = _get_postgres_document_store()
     store.write_text(storage_key(GRAPH_JSON_KEY), json.dumps(graph, indent=2, ensure_ascii=True) + "\n", content_type="application/json")
     store.write_text(storage_key(GRAPH_YAML_KEY), _canonical_yaml_text(graph), content_type="application/yaml")
 
 
+def _persist_plan_state_postgres(plan_state: dict[str, Any]) -> None:
+    store = _get_postgres_document_store()
+    store.write_text(
+        storage_key(PLAN_STATE_JSON_KEY),
+        json.dumps(plan_state, indent=2, ensure_ascii=True) + "\n",
+        content_type="application/json",
+    )
+    store.write_text(storage_key(PLAN_STATE_YAML_KEY), _plan_state_yaml_text(plan_state), content_type="application/yaml")
+
+
 def _persist_graph_object_store(graph: dict[str, Any]) -> None:
     store = _get_object_store()
     store.write_text(storage_key(GRAPH_JSON_KEY), json.dumps(graph, indent=2, ensure_ascii=True) + "\n", content_type="application/json")
     store.write_text(storage_key(GRAPH_YAML_KEY), _canonical_yaml_text(graph), content_type="application/yaml")
+
+
+def _persist_plan_state_object_store(plan_state: dict[str, Any]) -> None:
+    store = _get_object_store()
+    store.write_text(
+        storage_key(PLAN_STATE_JSON_KEY),
+        json.dumps(plan_state, indent=2, ensure_ascii=True) + "\n",
+        content_type="application/json",
+    )
+    store.write_text(storage_key(PLAN_STATE_YAML_KEY), _plan_state_yaml_text(plan_state), content_type="application/yaml")
 
 
 def _save_bundle_local(bundle: dict[str, Any]) -> None:

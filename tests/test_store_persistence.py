@@ -196,6 +196,70 @@ class StorePersistenceTests(unittest.TestCase):
         self.assertIn(store.storage_key(store.GRAPH_JSON_KEY), fake_object_store.documents)
         self.assertIn(store.storage_key("bundles/bundle-object.yaml"), fake_object_store.documents)
 
+    def test_postgres_backend_round_trips_plan_state_with_revision_check(self) -> None:
+        fake_store = FakeDocumentStore()
+        graph = {
+            "metadata": {"name": "Execution Graph", "structure_version": 1},
+            "nodes": [],
+            "edges": [],
+        }
+        plan_state = {
+            "decisions": [
+                {
+                    "id": "decision.demo",
+                    "title": "Demo decision",
+                    "kind": "general",
+                    "status": "proposed",
+                }
+            ],
+            "tasks": [],
+            "blockers": [],
+            "acceptance_checks": [],
+            "evidence": [],
+            "attachments": [],
+            "agent_runs": [],
+            "agreement_log": [],
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "WORKBENCH_PERSISTENCE_BACKEND": "postgres",
+                "WORKBENCH_POSTGRES_DSN": "postgresql://demo",
+            },
+            clear=False,
+        ), patch.object(store, "_get_postgres_document_store", return_value=fake_store):
+            saved = store.save_plan_state(plan_state, graph=graph, updated_by="planner", expected_revision=0)
+            loaded = store.load_plan_state(graph=graph)
+
+        self.assertEqual(saved["revision"], 1)
+        self.assertEqual(saved["updated_by"], "planner")
+        self.assertEqual(loaded["decisions"][0]["id"], "decision.demo")
+        self.assertIn(store.storage_key(store.PLAN_STATE_JSON_KEY), fake_store.documents)
+        self.assertIn(store.storage_key(store.PLAN_STATE_YAML_KEY), fake_store.documents)
+
+    def test_describe_artifact_storage_surfaces_remote_update_env_vars(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WORKBENCH_PERSISTENCE_BACKEND": "mirror",
+                "WORKBENCH_OBJECT_STORE_BACKEND": "minio",
+                "WORKBENCH_MINIO_ENDPOINT": "minio:9000",
+                "WORKBENCH_MINIO_BUCKET": "workbench-artifacts",
+                "WORKBENCH_MINIO_SECURE": "0",
+                "WORKBENCH_PERSISTENCE_PREFIX": "demo/prefix",
+            },
+            clear=False,
+        ):
+            description = store.describe_artifact_storage()
+
+        self.assertEqual(description["persistence_backend"], "mirror")
+        self.assertTrue(description["object_store"]["enabled"])
+        self.assertEqual(description["object_store"]["endpoint"], "minio:9000")
+        self.assertEqual(description["object_store"]["bucket"], "workbench-artifacts")
+        self.assertEqual(description["object_store"]["prefix"], "demo/prefix")
+        self.assertIn("WORKBENCH_MINIO_ACCESS_KEY", description["object_store"]["credential_env_vars"])
+
 
 if __name__ == "__main__":
     unittest.main()

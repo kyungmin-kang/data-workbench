@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.DS_Store
+.playwright-browsers
+runtime/cache/*
+runtime/plans/*
+!runtime/cache/.gitkeep
+!runtime/plans/.gitkeep

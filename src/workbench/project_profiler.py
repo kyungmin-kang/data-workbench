@@ -3,55 +3,46 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from copy import deepcopy
-import hashlib
-import json
-import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Any
+import threading
+import time
+from typing import Any, Callable
+import uuid
 
 from .orm_scanner import collect_relationship_targets as collect_orm_relationship_targets
-from .orm_scanner import collect_sqlalchemy_table_relations, merge_relationship_targets, scan_orm_structure_hints
+from .orm_scanner import collect_sqlalchemy_class_relations, collect_sqlalchemy_table_relations, merge_relationship_targets, scan_orm_structure_hints
 from .profile import build_asset_descriptor, profile_asset
+from .project_profiler_planning import summarize_planning_hints
+from .project_profiler_support import (
+    DEFAULT_IGNORED_PARTS,
+    PROJECT_PROFILE_CACHE_VERSION,
+    append_hint_evidence_entry,
+    build_project_profile_cache_token,
+    enrich_sql_orm_hint_evidence,
+    group_data_assets,
+    is_ignored_project_dir_name,
+    iter_project_files,
+    load_cached_project_profile,
+    profile_cache_matches,
+    save_cached_project_profile,
+    with_project_profile_cache_metadata,
+)
 from .sql_scanner import scan_sql_structure_hints
-from .store import get_cache_dir, utc_timestamp
+from .store import utc_timestamp
 
 
-IGNORED_PARTS = {
-    ".git",
-    ".venv",
-    "__pycache__",
-    "runtime",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".nox",
-    ".next",
-    "node_modules",
-    "dist",
-    "build",
-    "coverage",
-}
+IGNORED_PARTS = DEFAULT_IGNORED_PARTS
 DATA_SUFFIXES = {".csv", ".gz", ".parquet", ".zip"}
 CODE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".sql"}
 DOC_SUFFIXES = {".md", ".pdf"}
+PYTHON_HINT_SUFFIXES = {".py"}
+UI_HINT_SUFFIXES = {".js", ".ts", ".tsx", ".jsx", ".html"}
+SQL_HINT_SUFFIXES = {".sql"}
 FASTAPI_ROUTE_RE = re.compile(r"@\s*(?:\w+\.)?(get|post|put|patch|delete)\(\s*[\"'](/[^\"']+)[\"']")
 FETCH_ROUTE_RE = re.compile(r"fetch\(\s*[\"'`](\/api\/[^\"'`]+)[\"'`]")
 AXIOS_ROUTE_RE = re.compile(r"axios\.(?:get|post|put|patch|delete)\(\s*[\"'`](\/api\/[^\"'`]+)[\"'`]")
-SQL_CREATE_TABLE_RE = re.compile(
-    r"create\s+table\s+(?:if\s+not\s+exists\s+)?(?P<name>[A-Za-z_][\w.]*)\s*\((?P<body>.*?)\)\s*;",
-    re.IGNORECASE | re.DOTALL,
-)
-SQL_CREATE_VIEW_RE = re.compile(
-    r"create\s+(?:or\s+replace\s+)?(?P<kind>materialized\s+view|view)\s+(?:if\s+not\s+exists\s+)?(?P<name>[A-Za-z_][\w.]*)\s+as\s+(?P<select>select\b.*?);",
-    re.IGNORECASE | re.DOTALL,
-)
-SQL_RELATION_RE = re.compile(
-    r"\b(from|join)\s+([A-Za-z_][\w.]*)(?:\s+(?:as\s+)?([A-Za-z_][\w]*))?",
-    re.IGNORECASE,
-)
-SQL_BARE_IDENTIFIER_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
 EXPORTED_COMPONENT_RE = re.compile(r"export\s+(?:default\s+)?function\s+([A-Z][A-Za-z0-9_]*)")
 FUNCTION_COMPONENT_RE = re.compile(r"\bfunction\s+([A-Z][A-Za-z0-9_]*)\s*\(")
 CONST_COMPONENT_RE = re.compile(r"\bconst\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(")
@@ -74,19 +65,47 @@ DESTRUCTURE_ASSIGN_RE = re.compile(
     r"(?:const|let|var)\s*\{([^}]+)\}\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\b",
 )
 GENERIC_UI_FIELDS = {"data", "json", "status", "length", "value", "items", "results", "meta"}
-PROJECT_PROFILE_CACHE_VERSION = "2"
+MAX_HINT_SCAN_FILE_BYTES = 768 * 1024
+GENERATED_HINT_FILE_SUFFIXES = (
+    ".min.js",
+    ".bundle.js",
+    ".chunk.js",
+    ".generated.js",
+    ".generated.ts",
+    ".generated.tsx",
+    ".generated.jsx",
+    ".generated.py",
+)
+PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL = 200
+PROJECT_PROFILE_JOB_TTL_SECONDS = 60 * 60
+PROJECT_PROFILE_JOBS: dict[str, dict[str, Any]] = {}
+PROJECT_PROFILE_JOBS_LOCK = threading.Lock()
 
 
-def profile_project(root_dir: Path, *, include_tests: bool = False, include_internal: bool = True) -> dict:
+def profile_project(
+    root_dir: Path,
+    *,
+    include_tests: bool = False,
+    include_internal: bool = True,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict:
     manifests: list[str] = []
     code_files: list[str] = []
     docs: list[str] = []
     data_files: list[Path] = []
+    files_scanned = 0
 
-    for path in iter_project_files(root_dir, include_tests=include_tests, include_internal=include_internal):
+    for path in iter_project_files(
+        root_dir,
+        include_tests=include_tests,
+        include_internal=include_internal,
+        is_test_path=is_test_path,
+        is_internal_workbench_path=is_internal_workbench_path,
+    ):
         relative = str(path.relative_to(root_dir))
         name = path.name
         suffix = path.suffix.lower()
+        files_scanned += 1
 
         if name in {"pyproject.toml", "package.json", "docker-compose.yml", "Dockerfile", "requirements.txt"}:
             manifests.append(relative)
@@ -96,14 +115,68 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
             docs.append(relative)
         if suffix in DATA_SUFFIXES:
             data_files.append(path)
+        if progress_callback and (
+            files_scanned == 1
+            or files_scanned % PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL == 0
+        ):
+            progress_callback(
+                {
+                    "phase": "walking_files",
+                    "message": "Walking the project tree.",
+                    "current_path": relative,
+                    "files_scanned": files_scanned,
+                    "manifests": len(manifests),
+                    "code_files": len(code_files),
+                    "docs": len(docs),
+                    "data_files": len(data_files),
+                }
+            )
 
-    data_assets = summarize_data_assets(root_dir, data_files)
-    code_hints = summarize_code_hints(root_dir, code_files)
+    progress_base = {
+        "files_scanned": files_scanned,
+        "manifests": len(manifests),
+        "code_files": len(code_files),
+        "docs": len(docs),
+        "data_files": len(data_files),
+    }
+    if progress_callback:
+        progress_callback(
+            {
+                **progress_base,
+                "phase": "profiling_assets",
+                "message": f"Profiling {len(data_files)} detected data assets.",
+                "data_assets_processed": 0,
+                "data_assets_total": len(data_files),
+            }
+        )
+    data_assets = summarize_data_assets(root_dir, data_files, progress_callback=progress_callback, progress_base=progress_base)
+    code_hints, code_hint_stats = summarize_code_hints(
+        root_dir,
+        code_files,
+        progress_callback=progress_callback,
+        progress_base=progress_base,
+    )
+    if progress_callback:
+        progress_callback(
+            {
+                **progress_base,
+                "phase": "planning_hints",
+                "message": "Mining planning hints from docs and the latest saved plan.",
+                "data_assets_total": len(data_assets),
+                "skipped_heavy_hint_files": code_hint_stats["skipped_heavy_hint_files"],
+            }
+        )
     planning_hints = summarize_planning_hints(root_dir)
+    notes: list[str] = []
+    if code_hint_stats["skipped_heavy_hint_files"]:
+        notes.append(
+            f"Skipped {code_hint_stats['skipped_heavy_hint_files']} oversized or generated code files during hint discovery."
+        )
 
     return {
         "root": str(root_dir),
         "summary": {
+            "files_scanned": files_scanned,
             "manifests": len(manifests),
             "code_files": len(code_files),
             "docs": len(docs),
@@ -116,6 +189,7 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
             "planning_api_hints": len(planning_hints["planning_api_hints"]),
             "planning_data_hints": len(planning_hints["planning_data_hints"]),
             "planning_compute_hints": len(planning_hints["planning_compute_hints"]),
+            "skipped_heavy_hint_files": code_hint_stats["skipped_heavy_hint_files"],
         },
         "manifests": manifests,
         "code_files_sample": code_files[:12],
@@ -128,6 +202,7 @@ def profile_project(root_dir: Path, *, include_tests: bool = False, include_inte
         "planning_api_hints": planning_hints["planning_api_hints"],
         "planning_data_hints": planning_hints["planning_data_hints"],
         "planning_compute_hints": planning_hints["planning_compute_hints"],
+        "notes": notes,
     }
 
 
@@ -138,6 +213,7 @@ def resolve_project_profile(
     include_internal: bool = True,
     profile_token: str | None = None,
     force_refresh: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     expected_token = build_project_profile_cache_token(
         root_dir,
@@ -148,15 +224,28 @@ def resolve_project_profile(
     if not force_refresh:
         for token in candidate_tokens:
             cached = load_cached_project_profile(token)
-            if cached and _profile_cache_matches(
+            if cached and profile_cache_matches(
                 cached,
                 root_dir=root_dir,
                 include_tests=include_tests,
                 include_internal=include_internal,
             ):
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "phase": "loading_cached_profile",
+                            "message": "Using the cached discovery snapshot for this root and scope.",
+                            "files_scanned": cached.get("summary", {}).get("files_scanned", 0),
+                        }
+                    )
                 return with_project_profile_cache_metadata(cached, cached=True)
 
-    profile = profile_project(root_dir, include_tests=include_tests, include_internal=include_internal)
+    profile = profile_project(
+        root_dir,
+        include_tests=include_tests,
+        include_internal=include_internal,
+        progress_callback=progress_callback,
+    )
     generated_at = utc_timestamp()
     cached_profile = with_project_profile_cache_metadata(
         profile,
@@ -170,135 +259,115 @@ def resolve_project_profile(
     return cached_profile
 
 
-def build_project_profile_cache_token(
+def summarize_data_assets(
     root_dir: Path,
+    data_files: list[Path],
     *,
-    include_tests: bool,
-    include_internal: bool,
-) -> str:
-    payload = json.dumps(
-        {
-            "root": str(root_dir.resolve()),
-            "include_tests": include_tests,
-            "include_internal": include_internal,
-            "version": PROJECT_PROFILE_CACHE_VERSION,
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-
-
-def load_cached_project_profile(profile_token: str) -> dict[str, Any] | None:
-    path = get_project_profile_cache_path(profile_token)
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as file:
-            payload = json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def save_cached_project_profile(project_profile: dict[str, Any]) -> None:
-    cache = project_profile.get("cache", {})
-    token = cache.get("token", "")
-    if not token:
-        return
-    path = get_project_profile_cache_path(token)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(project_profile, file, indent=2, ensure_ascii=True)
-        file.write("\n")
-
-
-def get_project_profile_cache_path(profile_token: str) -> Path:
-    return get_cache_dir() / "project_profiles" / f"{profile_token}.json"
-
-
-def with_project_profile_cache_metadata(
-    project_profile: dict[str, Any],
-    *,
-    cached: bool,
-    token: str | None = None,
-    generated_at: str | None = None,
-    include_tests: bool | None = None,
-    include_internal: bool | None = None,
-) -> dict[str, Any]:
-    profile = deepcopy(project_profile)
-    existing_cache = profile.get("cache", {}) if isinstance(profile.get("cache", {}), dict) else {}
-    profile["cache"] = {
-        "token": token or existing_cache.get("token", ""),
-        "generated_at": generated_at or existing_cache.get("generated_at", ""),
-        "cached": cached,
-        "include_tests": include_tests if include_tests is not None else bool(existing_cache.get("include_tests", False)),
-        "include_internal": include_internal if include_internal is not None else bool(existing_cache.get("include_internal", True)),
-        "version": PROJECT_PROFILE_CACHE_VERSION,
-    }
-    return profile
-
-
-def _profile_cache_matches(
-    project_profile: dict[str, Any],
-    *,
-    root_dir: Path,
-    include_tests: bool,
-    include_internal: bool,
-) -> bool:
-    cache = project_profile.get("cache", {})
-    if project_profile.get("root") != str(root_dir):
-        return False
-    return (
-        bool(cache.get("include_tests", False)) == include_tests
-        and bool(cache.get("include_internal", True)) == include_internal
-    )
-
-
-def is_ignored_project_dir_name(name: str) -> bool:
-    return name in IGNORED_PARTS or name.endswith(".egg-info")
-
-
-def iter_project_files(root_dir: Path, *, include_tests: bool, include_internal: bool):
-    for current_root, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = sorted(
-            dirname
-            for dirname in dirnames
-            if not is_ignored_project_dir_name(dirname)
-        )
-        current_root_path = Path(current_root)
-        for filename in sorted(filenames):
-            path = current_root_path / filename
-            relative = path.relative_to(root_dir).as_posix()
-            if not include_tests and is_test_path(relative):
-                continue
-            if not include_internal and is_internal_workbench_path(relative):
-                continue
-            yield path
-
-
-def summarize_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_base: dict[str, Any] | None = None,
+) -> list[dict]:
     grouped_entries = group_data_assets(root_dir, data_files)
-    summaries = [summarize_asset_entry(root_dir, entry) for entry in grouped_entries]
+    summaries: list[dict] = []
+    progress_base = progress_base or {}
+    for index, entry in enumerate(grouped_entries, start=1):
+        if progress_callback:
+            progress_callback(
+                {
+                    **progress_base,
+                    "phase": "profiling_assets",
+                    "message": f"Profiling data asset {index} of {len(grouped_entries)}.",
+                    "current_path": str(entry.get("path", "")),
+                    "data_assets_processed": index - 1,
+                    "data_assets_total": len(grouped_entries),
+                }
+            )
+        summaries.append(summarize_asset_entry(root_dir, entry))
+    if progress_callback and grouped_entries:
+        progress_callback(
+            {
+                **progress_base,
+                "phase": "profiling_assets",
+                "message": f"Profiled {len(grouped_entries)} data assets.",
+                "data_assets_processed": len(grouped_entries),
+                "data_assets_total": len(grouped_entries),
+            }
+        )
     return sorted(summaries, key=lambda item: item["path"])
 
 
-def summarize_code_hints(root_dir: Path, code_files: list[str]) -> dict[str, list[dict]]:
+def summarize_code_hints(
+    root_dir: Path,
+    code_files: list[str],
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_base: dict[str, Any] | None = None,
+) -> tuple[dict[str, list[dict]], dict[str, int]]:
     api_hints: list[dict] = []
     ui_hints: list[dict] = []
     sql_hints: list[dict] = []
     orm_hints: list[dict] = []
-    python_context = build_python_repo_context(root_dir, code_files)
+    progress_base = progress_base or {}
+    python_files: list[str] = []
+    ui_files: list[str] = []
+    sql_files: list[str] = []
+    skipped_heavy_hint_files = 0
+    seen_skipped: set[str] = set()
 
     for relative_path in code_files:
+        suffix = Path(relative_path).suffix.lower()
+        if suffix not in PYTHON_HINT_SUFFIXES | UI_HINT_SUFFIXES | SQL_HINT_SUFFIXES:
+            continue
+        if should_skip_hint_scan(root_dir, relative_path):
+            if relative_path not in seen_skipped:
+                skipped_heavy_hint_files += 1
+                seen_skipped.add(relative_path)
+            continue
+        if suffix in PYTHON_HINT_SUFFIXES:
+            python_files.append(relative_path)
+        if suffix in UI_HINT_SUFFIXES:
+            ui_files.append(relative_path)
+        if suffix in SQL_HINT_SUFFIXES:
+            sql_files.append(relative_path)
+
+    if progress_callback:
+        progress_callback(
+            {
+                **progress_base,
+                "phase": "indexing_python",
+                "message": f"Indexing {len(python_files)} Python modules for route and ORM context.",
+                "python_files_total": len(python_files),
+                "skipped_heavy_hint_files": skipped_heavy_hint_files,
+            }
+        )
+    python_context = build_python_repo_context(root_dir, python_files)
+    files_to_scan = sorted(set(python_files) | set(ui_files) | set(sql_files))
+
+    for index, relative_path in enumerate(files_to_scan, start=1):
         path = root_dir / relative_path
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
+        if progress_callback and (
+            index == 1
+            or index % 50 == 0
+            or index == len(files_to_scan)
+        ):
+            progress_callback(
+                {
+                    **progress_base,
+                    "phase": "summarizing_code",
+                    "message": f"Scanning code hints in {index} of {len(files_to_scan)} files.",
+                    "current_path": relative_path,
+                    "code_hint_files_processed": index,
+                    "code_hint_files_total": len(files_to_scan),
+                    "skipped_heavy_hint_files": skipped_heavy_hint_files,
+                }
+            )
 
-        api_hints.extend(extract_api_contract_hints(relative_path, text, python_context=python_context))
-        ui_hints.extend(extract_ui_contract_hints(relative_path, text))
-        if relative_path.endswith(".py"):
+        suffix = path.suffix.lower()
+        if suffix in PYTHON_HINT_SUFFIXES:
+            api_hints.extend(extract_api_contract_hints(relative_path, text, python_context=python_context))
             orm_hints.extend(
                 extract_orm_structure_hints(
                     relative_path,
@@ -306,256 +375,159 @@ def summarize_code_hints(root_dir: Path, code_files: list[str]) -> dict[str, lis
                     python_context=python_context.get(relative_path, {}),
                 )
             )
-        if relative_path.endswith(".sql"):
+        if suffix in UI_HINT_SUFFIXES:
+            ui_hints.extend(extract_ui_contract_hints(relative_path, text))
+        if suffix in SQL_HINT_SUFFIXES:
             sql_hints.extend(extract_sql_structure_hints(relative_path, text))
 
     sql_hints, orm_hints = enrich_sql_orm_hint_evidence(sql_hints, orm_hints)
-    return {
-        "api_contract_hints": dedupe_hint_list(api_hints, keys=("method", "route", "file")),
-        "ui_contract_hints": dedupe_hint_list(ui_hints, keys=("component", "file")),
-        "sql_structure_hints": dedupe_hint_list(sql_hints, keys=("relation", "object_type", "file")),
-        "orm_structure_hints": dedupe_hint_list(orm_hints, keys=("relation", "object_type", "file")),
+    return (
+        {
+            "api_contract_hints": dedupe_hint_list(api_hints, keys=("method", "route", "file")),
+            "ui_contract_hints": dedupe_hint_list(ui_hints, keys=("component", "file")),
+            "sql_structure_hints": dedupe_hint_list(sql_hints, keys=("relation", "object_type", "file")),
+            "orm_structure_hints": dedupe_hint_list(orm_hints, keys=("relation", "object_type", "file")),
+        },
+        {
+            "skipped_heavy_hint_files": skipped_heavy_hint_files,
+        },
+    )
+
+
+def should_skip_hint_scan(root_dir: Path, relative_path: str) -> bool:
+    name = Path(relative_path).name.lower()
+    if any(name.endswith(suffix) for suffix in GENERATED_HINT_FILE_SUFFIXES):
+        return True
+    try:
+        size = (root_dir / relative_path).stat().st_size
+    except OSError:
+        return False
+    return size > MAX_HINT_SCAN_FILE_BYTES
+
+
+def start_project_profile_job(
+    root_dir: Path,
+    *,
+    include_tests: bool = False,
+    include_internal: bool = True,
+    profile_token: str | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": utc_timestamp(),
+        "started_at": "",
+        "completed_at": "",
+        "error": "",
+        "options": {
+            "root_path": str(root_dir),
+            "include_tests": include_tests,
+            "include_internal": include_internal,
+            "profile_token": profile_token or "",
+            "force_refresh": force_refresh,
+        },
+        "progress": {
+            "phase": "queued",
+            "message": "Queued project discovery.",
+            "files_scanned": 0,
+            "updated_at": utc_timestamp(),
+        },
     }
+    with PROJECT_PROFILE_JOBS_LOCK:
+        prune_project_profile_jobs_locked()
+        PROJECT_PROFILE_JOBS[job_id] = job
 
+    def update_progress(update: dict[str, Any]) -> None:
+        with PROJECT_PROFILE_JOBS_LOCK:
+            current = PROJECT_PROFILE_JOBS.get(job_id)
+            if current is None:
+                return
+            progress = current.setdefault("progress", {})
+            progress.update({key: value for key, value in update.items() if value is not None})
+            progress["updated_at"] = utc_timestamp()
+            if current["status"] == "queued":
+                current["status"] = "running"
+                current["started_at"] = progress["updated_at"]
 
-def summarize_planning_hints(root_dir: Path) -> dict[str, list[dict]]:
-    from .structure_memory import collect_document_candidates, combine_partial_graph_candidates, extract_sql_relation_tag
-
-    doc_candidates = collect_document_candidates(root_dir, [])
-    api_hints: list[dict] = []
-    data_hints: list[dict] = []
-    compute_hints: list[dict] = []
-
-    for candidate in doc_candidates:
-        if candidate.get("type") != "api_route":
-            continue
-        route = candidate.get("route", "")
-        if not route:
-            continue
-        fields = candidate.get("fields", []) or []
-        api_hints.append(
-            {
-                "id": build_hint_id("plan-api", candidate.get("path", ""), route),
-                "label": candidate.get("label", route),
-                "route": route,
-                "file": candidate.get("path", ""),
-                "detected_from": candidate.get("source", "doc_spec"),
-                "response_fields": list(fields),
-                "required_fields": list(fields),
-                "response_field_sources": [],
-            }
-        )
-
-    partial_candidates = [candidate for candidate in doc_candidates if candidate.get("type") == "partial_graph"]
-    if partial_candidates:
-        plan_graph = combine_partial_graph_candidates(partial_candidates)
-        for node in plan_graph.get("nodes", []):
-            if node.get("removed"):
-                continue
-            if node["kind"] == "contract" and node.get("extension_type") == "api":
-                route = node.get("contract", {}).get("route", "")
-                if not route:
-                    continue
-                fields = [field for field in node.get("contract", {}).get("fields", []) if not field.get("removed")]
-                api_hints.append(
+    def run_job() -> None:
+        update_progress({"phase": "starting", "message": "Starting project discovery."})
+        try:
+            project_profile = resolve_project_profile(
+                root_dir,
+                include_tests=include_tests,
+                include_internal=include_internal,
+                profile_token=profile_token,
+                force_refresh=force_refresh,
+                progress_callback=update_progress,
+            )
+        except Exception as error:  # pragma: no cover - defensive job wrapper
+            with PROJECT_PROFILE_JOBS_LOCK:
+                current = PROJECT_PROFILE_JOBS.get(job_id)
+                if current is None:
+                    return
+                current["status"] = "failed"
+                current["error"] = str(error)
+                current["completed_at"] = utc_timestamp()
+                current.setdefault("progress", {}).update(
                     {
-                        "id": node["id"],
-                        "label": node.get("label", route),
-                        "route": route,
-                        "file": "",
-                        "detected_from": "plan_structure",
-                        "response_fields": [field.get("name", "") for field in fields if field.get("name")],
-                        "required_fields": [field.get("name", "") for field in fields if field.get("name") and field.get("required", True)],
-                        "response_field_sources": [
-                            {
-                                "name": field.get("name", ""),
-                                "source_fields": [
-                                    {
-                                        "node_id": source.get("node_id", ""),
-                                        "relation": extract_sql_relation_tag(
-                                            next(
-                                                (candidate_node for candidate_node in plan_graph.get("nodes", []) if candidate_node["id"] == source.get("node_id", "")),
-                                                {},
-                                            )
-                                        ),
-                                        "column": source.get("column", ""),
-                                        "field": source.get("field", ""),
-                                    }
-                                    for source in field.get("sources", [])
-                                ],
-                            }
-                            for field in fields
-                            if field.get("name")
-                        ],
+                        "phase": "failed",
+                        "message": str(error),
+                        "updated_at": current["completed_at"],
                     }
                 )
-                continue
-            if node["kind"] == "data":
-                relation = extract_sql_relation_tag(node)
-                if not relation:
-                    continue
-                data_hints.append(
-                    {
-                        "id": node["id"],
-                        "label": node.get("label", relation),
-                        "relation": relation,
-                        "object_type": node.get("extension_type", "table"),
-                        "detected_from": "plan_structure",
-                        "fields": [
-                            {
-                                "name": column.get("name", ""),
-                                "data_type": column.get("data_type", "unknown"),
-                                "required": column.get("required", True),
-                                "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
-                            }
-                            for column in node.get("columns", [])
-                            if column.get("name") and not column.get("removed")
-                        ],
-                    }
-                )
-                continue
-            if node["kind"] != "compute":
-                continue
-            relation = extract_sql_relation_tag(node) or node.get("label", node["id"])
-            compute_hints.append(
+            return
+
+        with PROJECT_PROFILE_JOBS_LOCK:
+            current = PROJECT_PROFILE_JOBS.get(job_id)
+            if current is None:
+                return
+            current["status"] = "completed"
+            current["completed_at"] = utc_timestamp()
+            current["project_profile"] = project_profile
+            current.setdefault("progress", {}).update(
                 {
-                    "id": node["id"],
-                    "label": node.get("label", relation),
-                    "relation": relation,
-                    "extension_type": node.get("extension_type", ""),
-                    "detected_from": "plan_structure",
-                    "inputs": list(node.get("compute", {}).get("inputs", [])),
-                    "outputs": list(node.get("compute", {}).get("outputs", [])),
-                    "fields": [
-                        {
-                            "name": column.get("name", ""),
-                            "data_type": column.get("data_type", "unknown"),
-                            "required": column.get("required", True),
-                            "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
-                        }
-                        for column in node.get("columns", [])
-                        if column.get("name") and not column.get("removed")
-                    ],
+                    "phase": "completed",
+                    "message": "Project discovery is ready.",
+                    "updated_at": current["completed_at"],
                 }
             )
 
-    return {
-        "planning_api_hints": dedupe_hint_list(api_hints, keys=("route", "detected_from")),
-        "planning_data_hints": dedupe_hint_list(data_hints, keys=("relation", "object_type")),
-        "planning_compute_hints": dedupe_hint_list(compute_hints, keys=("relation", "extension_type")),
-    }
+    thread = threading.Thread(target=run_job, name=f"project-profile-{job_id}", daemon=True)
+    thread.start()
+    return deepcopy(job)
 
 
-def resolve_plan_source_fields(plan_graph: dict[str, Any], lineage_inputs: list[dict]) -> list[dict]:
-    source_fields: list[dict] = []
-    field_lookup: dict[str, tuple[str, str]] = {}
-    for node in plan_graph.get("nodes", []):
-        for column in node.get("columns", []):
-            if column.get("id"):
-                field_lookup[column["id"]] = (node["id"], column.get("name", ""))
-        for field in node.get("contract", {}).get("fields", []):
-            if field.get("id"):
-                field_lookup[field["id"]] = (node["id"], field.get("name", ""))
-
-    for lineage in lineage_inputs or []:
-        field_ref = lineage.get("field_id", "") if isinstance(lineage, dict) else str(lineage or "")
-        if not field_ref:
-            continue
-        node_id = ""
-        field_name = ""
-        if field_ref in field_lookup:
-            node_id, field_name = field_lookup[field_ref]
-        elif "." in field_ref:
-            node_id, field_name = field_ref.rsplit(".", 1)
-        if not node_id or not field_name:
-            continue
-        source_node = next((candidate for candidate in plan_graph.get("nodes", []) if candidate["id"] == node_id), {})
-        source_fields.append(
-            {
-                "node_id": node_id,
-                "relation": extract_sql_relation_from_node(source_node),
-                "column": field_name if source_node.get("kind") != "contract" else "",
-                "field": field_name if source_node.get("kind") == "contract" else "",
-            }
-        )
-    return source_fields
+def get_project_profile_job(job_id: str) -> dict[str, Any] | None:
+    with PROJECT_PROFILE_JOBS_LOCK:
+        prune_project_profile_jobs_locked()
+        job = PROJECT_PROFILE_JOBS.get(job_id)
+        return deepcopy(job) if job else None
 
 
-def extract_sql_relation_from_node(node: dict) -> str:
-    for tag in node.get("tags", []) or []:
-        if tag.startswith("sql_relation:"):
-            return tag.split(":", 1)[1]
-    return ""
+def prune_project_profile_jobs_locked() -> None:
+    cutoff = time.time() - PROJECT_PROFILE_JOB_TTL_SECONDS
+    expired_ids = [
+        job_id
+        for job_id, job in PROJECT_PROFILE_JOBS.items()
+        if job.get("status") in {"completed", "failed"}
+        and parse_job_timestamp(job.get("completed_at", "") or job.get("created_at", "")) < cutoff
+    ]
+    for job_id in expired_ids:
+        PROJECT_PROFILE_JOBS.pop(job_id, None)
 
 
-def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
-    parquet_by_dir: dict[str, list[str]] = defaultdict(list)
-    direct_entries: list[dict[str, str | None]] = []
-
-    for path in data_files:
-        relative = path.relative_to(root_dir).as_posix()
-        if path.suffix.lower() == ".parquet":
-            parquet_by_dir[str(path.relative_to(root_dir).parent).replace("\\", "/")].append(relative)
-            continue
-        direct_entries.append({"path": relative, "kind": None, "format": None})
-
-    grouped_entries: list[dict[str, str | None]] = []
-    for parent, files in sorted(parquet_by_dir.items()):
-        if len(files) > 1:
-            pattern = f"{parent}/*.parquet" if parent != "." else "*.parquet"
-            grouped_entries.append({"path": pattern, "kind": "glob", "format": "parquet_collection"})
-            continue
-        grouped_entries.append({"path": files[0], "kind": None, "format": None})
-
-    return sorted(direct_entries + grouped_entries, key=lambda item: item["path"] or "")
-
-
-def enrich_sql_orm_hint_evidence(
-    sql_hints: list[dict[str, Any]],
-    orm_hints: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    supported_object_types = {"table", "view", "materialized_view"}
-    sql_by_relation = {
-        hint.get("relation", ""): hint
-        for hint in sql_hints
-        if hint.get("relation") and hint.get("object_type") in supported_object_types
-    }
-    orm_by_relation = {
-        hint.get("relation", ""): hint
-        for hint in orm_hints
-        if hint.get("relation") and hint.get("object_type") in supported_object_types
-    }
-
-    for relation in sorted(set(sql_by_relation) & set(orm_by_relation)):
-        sql_hint = sql_by_relation[relation]
-        orm_hint = orm_by_relation[relation]
-        shared_fields = {
-            field.get("name", "")
-            for field in sql_hint.get("fields", [])
-            if field.get("name")
-        } & {
-            field.get("name", "")
-            for field in orm_hint.get("fields", [])
-            if field.get("name")
-        }
-        if not shared_fields:
-            continue
-        append_hint_evidence_entry(sql_hint, "schema_match")
-        append_hint_evidence_entry(orm_hint, "schema_match")
-        for field in sql_hint.get("fields", []):
-            if field.get("name", "") in shared_fields:
-                append_hint_evidence_entry(field, "schema_match")
-        for field in orm_hint.get("fields", []):
-            if field.get("name", "") in shared_fields:
-                append_hint_evidence_entry(field, "schema_match")
-
-    return sql_hints, orm_hints
-
-
-def append_hint_evidence_entry(item: dict[str, Any], evidence: str) -> None:
-    if not evidence:
-        return
-    item["evidence"] = sorted(dict.fromkeys([*(item.get("evidence", []) or []), evidence]))
+def parse_job_timestamp(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def build_python_repo_context(root_dir: Path, code_files: list[str]) -> dict[str, dict[str, Any]]:
@@ -954,251 +926,6 @@ def extract_orm_structure_hints(
         imported_table_relations=python_context.get("table_relations", {}),
         imported_relationship_targets=python_context.get("relationship_targets", {}),
     )
-
-
-def collect_sqlalchemy_class_relations(tree: ast.AST) -> dict[str, str]:
-    relations: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        relation_name = ""
-        schema_name = ""
-        for statement in node.body:
-            if isinstance(statement, ast.Assign):
-                target_names = [target.id for target in statement.targets if isinstance(target, ast.Name)]
-                if "__tablename__" in target_names and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-                    relation_name = statement.value.value
-                elif "__table_args__" in target_names:
-                    schema_name = extract_sqlalchemy_schema(statement.value)
-            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
-                if statement.target.id == "__tablename__" and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-                    relation_name = statement.value.value
-                elif statement.target.id == "__table_args__":
-                    schema_name = extract_sqlalchemy_schema(statement.value)
-        if relation_name:
-            relations[node.name] = f"{schema_name}.{relation_name}" if schema_name else relation_name
-    return relations
-
-
-def extract_sqlalchemy_schema(node: ast.AST | None) -> str:
-    if node is None:
-        return ""
-    if isinstance(node, ast.Dict):
-        for key, value in zip(node.keys, node.values):
-            if isinstance(key, ast.Constant) and key.value == "schema" and isinstance(value, ast.Constant) and isinstance(value.value, str):
-                return value.value
-        return ""
-    if isinstance(node, (ast.Tuple, ast.List)):
-        for element in reversed(node.elts):
-            schema_name = extract_sqlalchemy_schema(element)
-            if schema_name:
-                return schema_name
-        return ""
-    if isinstance(node, ast.Call) and get_ast_name(node.func).split(".")[-1] == "dict":
-        for keyword in node.keywords:
-            if keyword.arg == "schema" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                return keyword.value.value
-    return ""
-
-
-def extract_sqlalchemy_field_hint(
-    field_name: str,
-    value: ast.AST | None,
-    *,
-    annotation: ast.AST | None = None,
-    schema_name: str = "",
-) -> dict | None:
-    if not field_name or field_name.startswith("__") or value is None:
-        return None
-    if not isinstance(value, ast.Call):
-        return None
-
-    function_name = get_ast_name(value.func).split(".")[-1]
-    if function_name in {"relationship", "dynamic_loader", "association_proxy"}:
-        return None
-    if function_name not in {"Column", "mapped_column"}:
-        return None
-
-    candidate_type_nodes = list(value.args)
-    if candidate_type_nodes and isinstance(candidate_type_nodes[0], ast.Constant) and isinstance(candidate_type_nodes[0].value, str):
-        candidate_type_nodes = candidate_type_nodes[1:]
-    candidate_type_nodes.extend(keyword.value for keyword in value.keywords if keyword.arg in {"type_", "type"} and keyword.value is not None)
-
-    data_type = "unknown"
-    for candidate in candidate_type_nodes:
-        inferred = infer_sqlalchemy_type(candidate)
-        if inferred:
-            data_type = inferred
-            break
-    if data_type == "unknown" and annotation is not None:
-        inferred = infer_sqlalchemy_type(annotation)
-        if inferred:
-            data_type = inferred
-
-    source_fields = extract_sqlalchemy_source_fields(value, schema_name=schema_name)
-    column_hint: dict[str, object] = {
-        "name": field_name,
-        "data_type": data_type,
-        "source_fields": source_fields,
-    }
-    for keyword in value.keywords:
-        if keyword.arg == "primary_key":
-            flag = extract_bool_constant(keyword.value)
-            if flag is not None:
-                column_hint["primary_key"] = flag
-        elif keyword.arg == "nullable":
-            flag = extract_bool_constant(keyword.value)
-            if flag is not None:
-                column_hint["nullable"] = flag
-        elif keyword.arg == "index":
-            flag = extract_bool_constant(keyword.value)
-            if flag is not None:
-                column_hint["index"] = flag
-        elif keyword.arg == "unique":
-            flag = extract_bool_constant(keyword.value)
-            if flag is not None:
-                column_hint["unique"] = flag
-
-    if source_fields:
-        column_hint["foreign_key"] = ",".join(
-            f"{source['relation']}.{source['column']}" if source.get("column") else source["relation"]
-            for source in source_fields
-            if source.get("relation")
-        )
-
-    return column_hint
-
-
-def extract_sqlalchemy_relationship_relation(
-    value: ast.AST | None,
-    *,
-    class_relations: dict[str, str],
-    schema_name: str = "",
-) -> str:
-    if not isinstance(value, ast.Call):
-        return ""
-    function_name = get_ast_name(value.func).split(".")[-1]
-    if function_name not in {"relationship", "dynamic_loader", "association_proxy"}:
-        return ""
-    if not value.args:
-        return ""
-    target = value.args[0]
-    if isinstance(target, ast.Constant) and isinstance(target.value, str):
-        raw_target = target.value
-    else:
-        raw_target = get_ast_name(target).split(".")[-1]
-    if not raw_target:
-        return ""
-    if raw_target in class_relations:
-        return class_relations[raw_target]
-    if "." in raw_target:
-        return qualify_foreign_relation(raw_target, schema_name=schema_name)[0]
-    return ""
-
-
-def extract_sqlalchemy_source_fields(call_node: ast.Call, *, schema_name: str = "") -> list[dict]:
-    source_fields: list[dict] = []
-    for candidate in [*call_node.args, *(keyword.value for keyword in call_node.keywords)]:
-        relation, column = extract_foreign_key_reference(candidate, schema_name=schema_name)
-        if not relation:
-            continue
-        source_fields.append({"relation": relation, "column": column})
-    deduped: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for source in source_fields:
-        key = (source["relation"], source.get("column", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(source)
-    return deduped
-
-
-def extract_foreign_key_reference(node: ast.AST | None, *, schema_name: str = "") -> tuple[str, str]:
-    if not isinstance(node, ast.Call):
-        return "", ""
-    function_name = get_ast_name(node.func).split(".")[-1]
-    if function_name != "ForeignKey" or not node.args:
-        return "", ""
-    target = node.args[0]
-    if not isinstance(target, ast.Constant) or not isinstance(target.value, str):
-        return "", ""
-    return qualify_foreign_relation(target.value, schema_name=schema_name)
-
-
-def qualify_foreign_relation(reference: str, *, schema_name: str = "") -> tuple[str, str]:
-    normalized = reference.strip().strip('"').strip("'")
-    if not normalized:
-        return "", ""
-    parts = [part for part in normalized.split(".") if part]
-    if len(parts) >= 3:
-        return ".".join(parts[:-1]), parts[-1]
-    if len(parts) == 2:
-        relation = f"{schema_name}.{parts[0]}" if schema_name else parts[0]
-        return relation, parts[1]
-    relation = f"{schema_name}.{parts[0]}" if schema_name else parts[0]
-    return relation, ""
-
-
-def extract_bool_constant(node: ast.AST | None) -> bool | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
-        return node.value
-    return None
-
-
-def infer_sqlalchemy_type(node: ast.AST | None) -> str:
-    if node is None:
-        return ""
-    if isinstance(node, ast.Subscript):
-        base_name = get_ast_name(node.value).split(".")[-1]
-        if base_name in {"Mapped", "Optional", "list", "List", "Sequence"}:
-            return infer_sqlalchemy_type(get_subscript_slice(node))
-    if isinstance(node, ast.Tuple):
-        for element in node.elts:
-            inferred = infer_sqlalchemy_type(element)
-            if inferred:
-                return inferred
-        return ""
-    if isinstance(node, ast.Call):
-        function_name = get_ast_name(node.func).split(".")[-1]
-        if function_name == "ForeignKey":
-            return ""
-        return map_sqlalchemy_type_name(function_name)
-    if isinstance(node, ast.Name):
-        return map_sqlalchemy_type_name(node.id)
-    if isinstance(node, ast.Attribute):
-        return map_sqlalchemy_type_name(node.attr)
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool):
-            return "boolean"
-        if isinstance(node.value, int):
-            return "integer"
-        if isinstance(node.value, float):
-            return "float"
-        if isinstance(node.value, str):
-            return "string"
-    return ""
-
-
-def map_sqlalchemy_type_name(type_name: str) -> str:
-    normalized = type_name.lower()
-    if normalized in {"integer", "int", "biginteger", "smallinteger"}:
-        return "integer"
-    if normalized in {"numeric", "decimal", "float", "real", "double", "doubleprecision"}:
-        return "float"
-    if normalized in {"string", "text", "unicode", "varchar", "char"}:
-        return "string"
-    if normalized in {"boolean", "bool"}:
-        return "boolean"
-    if normalized in {"date"}:
-        return "date"
-    if normalized in {"datetime", "timestamp"}:
-        return "datetime"
-    if normalized in {"json", "jsonb"}:
-        return "json"
-    if normalized in {"array"}:
-        return "array"
-    return ""
 
 
 def extract_api_contract_hints_from_python(
@@ -3818,173 +3545,3 @@ def humanize_asset_name(path: str) -> str:
             normalized = Path(filename).stem
     cleaned = normalized.replace("_", " ").replace("-", " ").strip()
     return cleaned.title() or "Imported Asset"
-
-
-def parse_sql_table_columns(body: str) -> list[dict]:
-    fields: list[dict] = []
-    for entry in split_sql_top_level(body):
-        stripped = entry.strip().strip(",")
-        if not stripped:
-            continue
-        lowered = stripped.lower()
-        if lowered.startswith(("primary key", "foreign key", "constraint", "unique", "index", "key", "check")):
-            continue
-        parts = stripped.split()
-        if len(parts) < 2:
-            continue
-        column_name = normalize_sql_identifier(parts[0])
-        if not column_name:
-            continue
-        data_type = parts[1].rstrip(",")
-        fields.append({"name": column_name, "data_type": data_type.lower(), "source_fields": []})
-    return fields
-
-
-def parse_sql_select_projection(select_sql: str) -> tuple[list[dict], list[str]]:
-    lowered = select_sql.lower()
-    if "select" not in lowered or "from" not in lowered:
-        return [], []
-    select_start = lowered.find("select") + len("select")
-    from_index = find_top_level_keyword(select_sql, "from", start=select_start)
-    if from_index == -1:
-        return [], []
-    select_list = select_sql[select_start:from_index]
-    relation_aliases = extract_sql_relation_aliases(select_sql[from_index:])
-    upstream_relations = sorted(dict.fromkeys(relation_aliases.values()))
-    projections: list[dict] = []
-    for expression in split_sql_top_level(select_list):
-        parsed = parse_sql_projection_expression(expression, relation_aliases, upstream_relations)
-        if parsed:
-            projections.append(parsed)
-    return projections, upstream_relations
-
-
-def extract_sql_relation_aliases(sql_tail: str) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for _kind, relation, alias in SQL_RELATION_RE.findall(sql_tail):
-        normalized_relation = normalize_sql_identifier(relation)
-        if not normalized_relation:
-            continue
-        aliases[normalized_relation.split(".")[-1]] = normalized_relation
-        if alias:
-            aliases[normalize_sql_identifier(alias)] = normalized_relation
-    return aliases
-
-
-def parse_sql_projection_expression(expression: str, relation_aliases: dict[str, str], upstream_relations: list[str]) -> dict | None:
-    stripped = expression.strip()
-    if not stripped:
-        return None
-    output_name = infer_sql_projection_name(stripped)
-    if not output_name or output_name == "*":
-        return None
-
-    source_fields = []
-    for relation_alias, column_name in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)", stripped):
-        relation = relation_aliases.get(normalize_sql_identifier(relation_alias), normalize_sql_identifier(relation_alias))
-        source_fields.append({"relation": relation, "column": normalize_sql_identifier(column_name)})
-
-    if not source_fields and len(upstream_relations) == 1:
-        relation = upstream_relations[0]
-        for token in SQL_BARE_IDENTIFIER_RE.findall(stripped):
-            normalized = normalize_sql_identifier(token)
-            if (
-                normalized
-                and normalized not in {output_name, "select", "from", "as", "and", "or", "when", "then", "else", "end", "null", "case", "sum", "avg", "count", "min", "max", "coalesce", "cast", "distinct"}
-                and not normalized.isdigit()
-            ):
-                source_fields.append({"relation": relation, "column": normalized})
-
-    deduped_sources = []
-    seen: set[tuple[str, str]] = set()
-    for source in source_fields:
-        key = (source["relation"], source["column"])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped_sources.append(source)
-
-    return {
-        "name": output_name,
-        "data_type": "unknown",
-        "source_fields": deduped_sources,
-    }
-
-
-def infer_sql_projection_name(expression: str) -> str:
-    match = re.search(r"\bas\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", expression, re.IGNORECASE)
-    if match:
-        return normalize_sql_identifier(match.group(1))
-    stripped = expression.strip()
-    if "." in stripped and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*", stripped):
-        return normalize_sql_identifier(stripped.split(".")[-1])
-    trailing = re.search(r"\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", stripped)
-    if trailing and "(" in stripped:
-        return normalize_sql_identifier(trailing.group(1))
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
-        return normalize_sql_identifier(stripped)
-    return ""
-
-
-def split_sql_top_level(text: str) -> list[str]:
-    parts: list[str] = []
-    current: list[str] = []
-    depth = 0
-    in_single = False
-    in_double = False
-    previous = ""
-    for character in text:
-        if character == "'" and not in_double and previous != "\\":
-            in_single = not in_single
-        elif character == '"' and not in_single and previous != "\\":
-            in_double = not in_double
-        elif not in_single and not in_double:
-            if character == "(":
-                depth += 1
-            elif character == ")":
-                depth = max(0, depth - 1)
-            elif character == "," and depth == 0:
-                part = "".join(current).strip()
-                if part:
-                    parts.append(part)
-                current = []
-                previous = character
-                continue
-        current.append(character)
-        previous = character
-    tail = "".join(current).strip()
-    if tail:
-        parts.append(tail)
-    return parts
-
-
-def find_top_level_keyword(text: str, keyword: str, *, start: int = 0) -> int:
-    lowered = text.lower()
-    keyword = keyword.lower()
-    depth = 0
-    in_single = False
-    in_double = False
-    previous = ""
-    for index in range(start, len(text)):
-        character = text[index]
-        if character == "'" and not in_double and previous != "\\":
-            in_single = not in_single
-        elif character == '"' and not in_single and previous != "\\":
-            in_double = not in_double
-        elif not in_single and not in_double:
-            if character == "(":
-                depth += 1
-            elif character == ")":
-                depth = max(0, depth - 1)
-            elif depth == 0 and lowered.startswith(keyword, index):
-                before = lowered[index - 1] if index > 0 else " "
-                after_index = index + len(keyword)
-                after = lowered[after_index] if after_index < len(lowered) else " "
-                if not before.isalnum() and not after.isalnum():
-                    return index
-        previous = character
-    return -1
-
-
-def normalize_sql_identifier(value: str) -> str:
-    return value.strip().strip('"').strip("`").strip("[]")
