@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .hint_importer import import_api_hint_into_graph, import_ui_hint_into_graph
+from .hint_importer import import_api_hint_into_graph, import_orm_hint_into_graph, import_sql_hint_into_graph, import_ui_hint_into_graph
 from .importer import import_assets_into_graph
 from .types import validate_graph
 
@@ -17,9 +17,13 @@ def bootstrap_project_into_graph(
     asset_paths: list[str] | None = None,
     api_hint_ids: list[str] | None = None,
     ui_hint_ids: list[str] | None = None,
+    sql_hint_ids: list[str] | None = None,
+    orm_hint_ids: list[str] | None = None,
     import_assets: bool = True,
     import_api_hints: bool = True,
     import_ui_hints: bool = True,
+    import_sql_hints: bool = True,
+    import_orm_hints: bool = True,
 ) -> dict[str, Any]:
     if project_profile is None:
         from .project_profiler import resolve_project_profile
@@ -40,12 +44,18 @@ def bootstrap_project_into_graph(
         "ui_created": [],
         "ui_updated": [],
         "ui_created_fields": [],
+        "sql_created": [],
+        "sql_updated": [],
+        "orm_created": [],
+        "orm_updated": [],
         "created_edges": [],
         "binding_summary": {"applied": [], "unresolved": []},
         "selection": {
             "asset_paths": [],
             "api_hint_ids": [],
             "ui_hint_ids": [],
+            "sql_hint_ids": [],
+            "orm_hint_ids": [],
         },
     }
 
@@ -91,6 +101,28 @@ def bootstrap_project_into_graph(
         summary["created_edges"].extend(imported_ui["imported"].get("created_edge_ids", []))
         _extend_binding_summary(summary["binding_summary"], imported_ui["imported"].get("binding_summary", {}))
 
+    selected_sql_hints = _select_hints(project_profile.get("sql_structure_hints", []), sql_hint_ids, import_sql_hints)
+    summary["selection"]["sql_hint_ids"] = [hint["id"] for hint in selected_sql_hints]
+    for hint in selected_sql_hints:
+        imported_sql = import_sql_hint_into_graph(updated, hint)
+        updated = imported_sql["graph"]
+        if imported_sql["imported"]["created"]:
+            summary["sql_created"].extend(imported_sql["imported"].get("created_node_ids", []) or [imported_sql["imported"]["node_id"]])
+        else:
+            summary["sql_updated"].extend(imported_sql["imported"].get("updated_node_ids", []) or [imported_sql["imported"]["node_id"]])
+        summary["created_edges"].extend(imported_sql["imported"].get("created_edge_ids", []))
+
+    selected_orm_hints = _select_hints(project_profile.get("orm_structure_hints", []), orm_hint_ids, import_orm_hints)
+    summary["selection"]["orm_hint_ids"] = [hint["id"] for hint in selected_orm_hints]
+    for hint in selected_orm_hints:
+        imported_orm = import_orm_hint_into_graph(updated, hint)
+        updated = imported_orm["graph"]
+        if imported_orm["imported"]["created"]:
+            summary["orm_created"].extend(imported_orm["imported"].get("created_node_ids", []) or [imported_orm["imported"]["node_id"]])
+        else:
+            summary["orm_updated"].extend(imported_orm["imported"].get("updated_node_ids", []) or [imported_orm["imported"]["node_id"]])
+        summary["created_edges"].extend(imported_orm["imported"].get("created_edge_ids", []))
+
     summary["asset_imported"] = sorted(summary["asset_imported"], key=lambda item: item.get("data_node_id", ""))
     summary["asset_skipped"] = sorted(summary["asset_skipped"], key=lambda item: item.get("source_node_id", ""))
     summary["api_created"] = sorted(set(summary["api_created"]))
@@ -99,6 +131,10 @@ def bootstrap_project_into_graph(
     summary["ui_created"] = sorted(set(summary["ui_created"]))
     summary["ui_updated"] = sorted(set(summary["ui_updated"]) - set(summary["ui_created"]))
     summary["ui_created_fields"] = sorted(set(summary["ui_created_fields"]))
+    summary["sql_created"] = sorted(set(summary["sql_created"]))
+    summary["sql_updated"] = sorted(set(summary["sql_updated"]) - set(summary["sql_created"]))
+    summary["orm_created"] = sorted(set(summary["orm_created"]))
+    summary["orm_updated"] = sorted(set(summary["orm_updated"]) - set(summary["orm_created"]))
     summary["created_edges"] = sorted(set(summary["created_edges"]))
     summary["binding_summary"]["applied"] = _dedupe_binding_entries(summary["binding_summary"]["applied"])
     summary["binding_summary"]["unresolved"] = _dedupe_binding_entries(summary["binding_summary"]["unresolved"])

@@ -4,6 +4,19 @@ from copy import deepcopy
 from typing import Any
 
 from .binding_suggestions import format_source_ref, suggest_contract_field_source
+from .structure_blueprints import (
+    build_orm_query_projection_compute_node_from_hint,
+    build_orm_query_projection_data_node_from_hint,
+    build_sql_compute_node_from_hint,
+    build_sql_data_node_from_hint,
+)
+from .structure_reconciliation import (
+    build_edge,
+    match_orm_query_compute_node_id,
+    match_orm_query_data_node_id,
+    match_sql_compute_node_id,
+    match_sql_data_node_id,
+)
 from .types import slugify, validate_graph
 
 
@@ -115,6 +128,112 @@ def import_ui_hint_into_graph(
                 "unresolved": dedupe_binding_entries(binding_summary["unresolved"]),
             },
         },
+    }
+
+
+def import_sql_hint_into_graph(graph: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    updated = deepcopy(graph)
+    imported = upsert_sql_structure_from_hint(updated, hint)
+    validated = validate_graph(updated)
+    return {
+        "graph": validated,
+        "imported": imported,
+    }
+
+
+def import_orm_hint_into_graph(graph: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    updated = deepcopy(graph)
+    if hint.get("object_type") == "query_projection":
+        imported = upsert_orm_structure_from_hint(updated, hint)
+    else:
+        imported = upsert_sql_structure_from_hint(updated, hint)
+    validated = validate_graph(updated)
+    return {
+        "graph": validated,
+        "imported": imported,
+    }
+
+
+def upsert_sql_structure_from_hint(graph: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    relation = hint.get("relation", "")
+    if not relation:
+        raise ValueError("SQL hint is missing relation.")
+    object_type = hint.get("object_type", "table")
+    created_node_ids: list[str] = []
+    updated_node_ids: list[str] = []
+    created_edge_ids: list[str] = []
+
+    data_node = _ensure_sql_relation_node(graph, hint, created_node_ids, updated_node_ids)
+    node_id = data_node["id"]
+    if object_type not in {"view", "materialized_view"}:
+        for upstream_relation in hint.get("upstream_relations", []) or []:
+            upstream_node = _ensure_upstream_sql_relation_node(graph, upstream_relation)
+            edge_result = _ensure_graph_edge(graph, "depends_on", upstream_node["id"], data_node["id"], hint.get("file", "project survey"))
+            if edge_result["created"]:
+                created_edge_ids.append(edge_result["edge_id"])
+        return {
+            "node_id": node_id,
+            "created": node_id in created_node_ids,
+            "created_node_ids": sorted(set(created_node_ids)),
+            "updated_node_ids": sorted(set(updated_node_ids) - set(created_node_ids)),
+            "created_edge_ids": sorted(set(created_edge_ids)),
+        }
+
+    compute_node = _ensure_sql_compute_node(graph, hint, data_node["id"], created_node_ids, updated_node_ids)
+    node_id = compute_node["id"]
+    edge_result = _ensure_graph_edge(graph, "produces", compute_node["id"], data_node["id"], hint.get("file", "project survey"))
+    if edge_result["created"]:
+        created_edge_ids.append(edge_result["edge_id"])
+    compute = compute_node.setdefault("compute", {})
+    compute["runtime"] = "sql"
+    compute["outputs"] = sorted(dict.fromkeys([*(compute.get("outputs") or []), data_node["id"]]))
+    for upstream_relation in hint.get("upstream_relations", []) or []:
+        upstream_node = _ensure_upstream_sql_relation_node(graph, upstream_relation)
+        compute["inputs"] = sorted(dict.fromkeys([*(compute.get("inputs") or []), upstream_node["id"]]))
+        edge_result = _ensure_graph_edge(graph, "depends_on", upstream_node["id"], compute_node["id"], hint.get("file", "project survey"))
+        if edge_result["created"]:
+            created_edge_ids.append(edge_result["edge_id"])
+    return {
+        "node_id": node_id,
+        "created": node_id in created_node_ids,
+        "created_node_ids": sorted(set(created_node_ids)),
+        "updated_node_ids": sorted(set(updated_node_ids) - set(created_node_ids)),
+        "created_edge_ids": sorted(set(created_edge_ids)),
+    }
+
+
+def upsert_orm_structure_from_hint(graph: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    relation = hint.get("relation", "")
+    if not relation:
+        raise ValueError("ORM hint is missing relation.")
+    fields = hint.get("fields", []) or []
+    if not fields:
+        raise ValueError("ORM query projection hint is missing fields.")
+    created_node_ids: list[str] = []
+    updated_node_ids: list[str] = []
+    created_edge_ids: list[str] = []
+
+    data_node = _ensure_orm_query_data_node(graph, hint, created_node_ids, updated_node_ids)
+    compute_node = _ensure_orm_query_compute_node(graph, hint, data_node["id"], created_node_ids, updated_node_ids)
+    edge_result = _ensure_graph_edge(graph, "produces", compute_node["id"], data_node["id"], hint.get("file", "project survey"))
+    if edge_result["created"]:
+        created_edge_ids.append(edge_result["edge_id"])
+    compute = compute_node.setdefault("compute", {})
+    compute["runtime"] = "orm"
+    compute["outputs"] = sorted(dict.fromkeys([*(compute.get("outputs") or []), data_node["id"]]))
+
+    for upstream_relation in hint.get("upstream_relations", []) or []:
+        upstream_node = _ensure_upstream_sql_relation_node(graph, upstream_relation)
+        compute["inputs"] = sorted(dict.fromkeys([*(compute.get("inputs") or []), upstream_node["id"]]))
+        edge_result = _ensure_graph_edge(graph, "depends_on", upstream_node["id"], compute_node["id"], hint.get("file", "project survey"))
+        if edge_result["created"]:
+            created_edge_ids.append(edge_result["edge_id"])
+    return {
+        "node_id": compute_node["id"],
+        "created": compute_node["id"] in created_node_ids,
+        "created_node_ids": sorted(set(created_node_ids)),
+        "updated_node_ids": sorted(set(updated_node_ids) - set(created_node_ids)),
+        "created_edge_ids": sorted(set(created_edge_ids)),
     }
 
 
@@ -308,6 +427,149 @@ def ensure_bind_edge(graph: dict[str, Any], source_id: str, target_id: str, hint
         }
     )
     return {"created": True, "edge_id": edge_id}
+
+
+def _ensure_graph_edge(graph: dict[str, Any], edge_type: str, source_id: str, target_id: str, hint_file: str) -> dict[str, Any]:
+    existing = next(
+        (
+            edge
+            for edge in graph.get("edges", [])
+            if edge["type"] == edge_type and edge["source"] == source_id and edge["target"] == target_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return {"created": False, "edge_id": existing["id"]}
+    edge = build_edge(edge_type, source_id, target_id)
+    edge["notes"] = f"Imported from structure hint: {hint_file}"
+    graph.setdefault("edges", []).append(edge)
+    return {"created": True, "edge_id": edge["id"]}
+
+
+def _merge_sql_columns(node: dict[str, Any], fields: list[dict[str, Any]]) -> None:
+    existing_by_name = {column.get("name"): column for column in node.get("columns", [])}
+    for field_hint in fields or []:
+        field_name = field_hint.get("name", "")
+        if not field_name:
+            continue
+        if field_name in existing_by_name:
+            column = existing_by_name[field_name]
+            if column.get("data_type", "unknown") == "unknown" and field_hint.get("data_type"):
+                column["data_type"] = field_hint["data_type"]
+            for metadata_key in ("primary_key", "foreign_key", "nullable", "index", "unique"):
+                if metadata_key in field_hint and metadata_key not in column:
+                    column[metadata_key] = field_hint[metadata_key]
+            continue
+        column = {
+            "name": field_name,
+            "data_type": field_hint.get("data_type", "unknown"),
+        }
+        for metadata_key in ("primary_key", "foreign_key", "nullable", "index", "unique"):
+            if metadata_key in field_hint:
+                column[metadata_key] = field_hint[metadata_key]
+        node.setdefault("columns", []).append(column)
+        existing_by_name[field_name] = column
+
+
+def _ensure_upstream_sql_relation_node(
+    graph: dict[str, Any],
+    relation: str,
+    *,
+    column_names: list[str] | None = None,
+) -> dict[str, Any]:
+    hint = {
+        "relation": relation,
+        "label": relation,
+        "object_type": "table",
+        "description": "Imported as upstream SQL relation from project discovery.",
+        "fields": [{"name": name, "data_type": "unknown"} for name in (column_names or []) if name],
+        "file": "",
+    }
+    created_node_ids: list[str] = []
+    updated_node_ids: list[str] = []
+    return _ensure_sql_relation_node(graph, hint, created_node_ids, updated_node_ids)
+
+
+def _ensure_sql_relation_node(
+    graph: dict[str, Any],
+    hint: dict[str, Any],
+    created_node_ids: list[str],
+    updated_node_ids: list[str],
+) -> dict[str, Any]:
+    relation = hint.get("relation") or hint.get("label") or "sql_relation"
+    node_id = match_sql_data_node_id(graph, relation)
+    node = next((candidate for candidate in graph.get("nodes", []) if candidate["id"] == node_id), None) if node_id else None
+    if node is None:
+        node = build_sql_data_node_from_hint(hint)
+        node.setdefault("notes", f"Imported from structure hint: {hint.get('file', 'project survey')}")
+        graph.setdefault("nodes", []).append(node)
+        created_node_ids.append(node["id"])
+    else:
+        updated_node_ids.append(node["id"])
+    _merge_sql_columns(node, hint.get("fields", []) or [])
+    return node
+
+
+def _ensure_sql_compute_node(
+    graph: dict[str, Any],
+    hint: dict[str, Any],
+    output_node_id: str,
+    created_node_ids: list[str],
+    updated_node_ids: list[str],
+) -> dict[str, Any]:
+    relation = hint.get("relation") or hint.get("label") or "sql_transform"
+    node_id = match_sql_compute_node_id(graph, relation)
+    node = next((candidate for candidate in graph.get("nodes", []) if candidate["id"] == node_id), None) if node_id else None
+    if node is None:
+        node = build_sql_compute_node_from_hint(hint, output_node_id=output_node_id)
+        node.setdefault("notes", f"Imported from structure hint: {hint.get('file', 'project survey')}")
+        graph.setdefault("nodes", []).append(node)
+        created_node_ids.append(node["id"])
+    else:
+        updated_node_ids.append(node["id"])
+    _merge_sql_columns(node, hint.get("fields", []) or [])
+    return node
+
+
+def _ensure_orm_query_data_node(
+    graph: dict[str, Any],
+    hint: dict[str, Any],
+    created_node_ids: list[str],
+    updated_node_ids: list[str],
+) -> dict[str, Any]:
+    relation = hint.get("relation") or "query_projection"
+    node_id = match_orm_query_data_node_id(graph, relation)
+    node = next((candidate for candidate in graph.get("nodes", []) if candidate["id"] == node_id), None) if node_id else None
+    if node is None:
+        node = build_orm_query_projection_data_node_from_hint(hint)
+        node.setdefault("notes", f"Imported from structure hint: {hint.get('file', 'project survey')}")
+        graph.setdefault("nodes", []).append(node)
+        created_node_ids.append(node["id"])
+    else:
+        updated_node_ids.append(node["id"])
+    _merge_sql_columns(node, hint.get("fields", []) or [])
+    return node
+
+
+def _ensure_orm_query_compute_node(
+    graph: dict[str, Any],
+    hint: dict[str, Any],
+    output_node_id: str,
+    created_node_ids: list[str],
+    updated_node_ids: list[str],
+) -> dict[str, Any]:
+    relation = hint.get("relation") or "query_projection"
+    node_id = match_orm_query_compute_node_id(graph, relation)
+    node = next((candidate for candidate in graph.get("nodes", []) if candidate["id"] == node_id), None) if node_id else None
+    if node is None:
+        node = build_orm_query_projection_compute_node_from_hint(hint, output_node_id=output_node_id)
+        node.setdefault("notes", f"Imported from structure hint: {hint.get('file', 'project survey')}")
+        graph.setdefault("nodes", []).append(node)
+        created_node_ids.append(node["id"])
+    else:
+        updated_node_ids.append(node["id"])
+    _merge_sql_columns(node, hint.get("fields", []) or [])
+    return node
 
 
 def seed_ui_fields_from_api(ui_node: dict[str, Any], api_node: dict[str, Any]) -> list[str]:

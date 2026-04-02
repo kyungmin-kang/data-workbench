@@ -12,6 +12,8 @@ class OnboardingBootstrapOptions(BaseModel):
     assets: bool = True
     apiHints: bool = True
     uiHints: bool = True
+    sqlHints: bool = True
+    ormHints: bool = True
 
 
 class OnboardingPreset(BaseModel):
@@ -28,6 +30,8 @@ class OnboardingPreset(BaseModel):
     selected_asset_paths: list[str] = Field(default_factory=list)
     selected_api_hint_ids: list[str] = Field(default_factory=list)
     selected_ui_hint_ids: list[str] = Field(default_factory=list)
+    selected_sql_hint_ids: list[str] = Field(default_factory=list)
+    selected_orm_hint_ids: list[str] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 

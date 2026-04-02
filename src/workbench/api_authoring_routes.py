@@ -17,7 +17,7 @@ from .api_models import (
 )
 from .binding_suggestions import collect_contract_field_candidates, suggest_contract_field_source
 from .diff import generate_change_plan
-from .hint_importer import import_api_hint_into_graph, import_ui_hint_into_graph
+from .hint_importer import import_api_hint_into_graph, import_orm_hint_into_graph, import_sql_hint_into_graph, import_ui_hint_into_graph
 from .importer import import_asset_into_graph, import_assets_into_graph
 from .openapi_importer import import_openapi_into_graph
 from .profile import profile_graph
@@ -155,6 +155,22 @@ def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str,
                 if item.get("route")
             }
             imported = import_ui_hint_into_graph(graph, hint, api_hints_by_route=api_hints_by_route)
+        elif payload.hint_kind == "sql":
+            hint = next(
+                (item for item in project_profile.get("sql_structure_hints", []) if item["id"] == payload.hint_id),
+                None,
+            )
+            if hint is None:
+                raise ValueError(f"SQL hint not found: {payload.hint_id}")
+            imported = import_sql_hint_into_graph(graph, hint)
+        elif payload.hint_kind == "orm":
+            hint = next(
+                (item for item in project_profile.get("orm_structure_hints", []) if item["id"] == payload.hint_id),
+                None,
+            )
+            if hint is None:
+                raise ValueError(f"ORM hint not found: {payload.hint_id}")
+            imported = import_orm_hint_into_graph(graph, hint)
         else:
             raise ValueError(f"Unsupported hint kind: {payload.hint_kind}")
 
@@ -194,9 +210,13 @@ def import_project_bootstrap_endpoint(payload: ProjectBootstrapRequest) -> dict[
             asset_paths=payload.asset_paths,
             api_hint_ids=payload.api_hint_ids,
             ui_hint_ids=payload.ui_hint_ids,
+            sql_hint_ids=payload.sql_hint_ids,
+            orm_hint_ids=payload.orm_hint_ids,
             import_assets=payload.import_assets,
             import_api_hints=payload.import_api_hints,
             import_ui_hints=payload.import_ui_hints,
+            import_sql_hints=payload.import_sql_hints,
+            import_orm_hints=payload.import_orm_hints,
         )
         updated_graph = imported["graph"]
         analysis = analyze_graph(updated_graph)

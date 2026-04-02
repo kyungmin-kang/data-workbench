@@ -52,11 +52,15 @@ function renderProjectProfile() {
   const selectedPaths = new Set(state.selectedProjectImports || []);
   const selectedApiHints = new Set(state.selectedProjectApiHints || []);
   const selectedUiHints = new Set(state.selectedProjectUiHints || []);
+  const selectedSqlHints = new Set(state.selectedProjectSqlHints || []);
+  const selectedOrmHints = new Set(state.selectedProjectOrmHints || []);
   const selectableCount = dataAssets.filter((asset) => asset.suggested_import).length;
   const bootstrapCount = (
-    (state.projectBootstrapOptions.assets ? selectableCount : 0)
-    + (state.projectBootstrapOptions.apiHints ? apiHints.length : 0)
-    + (state.projectBootstrapOptions.uiHints ? uiHints.length : 0)
+    (state.projectBootstrapOptions.assets ? (selectedPaths.size || selectableCount) : 0)
+    + (state.projectBootstrapOptions.apiHints ? (selectedApiHints.size || apiHints.length) : 0)
+    + (state.projectBootstrapOptions.uiHints ? (selectedUiHints.size || uiHints.length) : 0)
+    + (state.projectBootstrapOptions.sqlHints ? (selectedSqlHints.size || sqlHints.length) : 0)
+    + (state.projectBootstrapOptions.ormHints ? (selectedOrmHints.size || ormHints.length) : 0)
   );
   const bootstrapSummary = describeBootstrapScope({
     selectableCount,
@@ -65,12 +69,16 @@ function renderProjectProfile() {
     selectedApiHintCount: selectedApiHints.size,
     uiHintCount: uiHints.length,
     selectedUiHintCount: selectedUiHints.size,
+    sqlHintCount: sqlHints.length,
+    selectedSqlHintCount: selectedSqlHints.size,
+    ormHintCount: ormHints.length,
+    selectedOrmHintCount: selectedOrmHints.size,
   });
   projectProfileSummary.innerHTML = `
     ${renderProjectWizardNav()}
     ${state.projectWizardStep === 1 ? renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootstrapCount) : ""}
     ${state.projectWizardStep === 2 ? renderProjectWizardAssetsStep(dataAssets, filteredDataAssets, selectedPaths, selectableCount) : ""}
-    ${state.projectWizardStep === 3 ? renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints, filteredApiHints, filteredUiHints, filteredSqlHints, filteredOrmHints, selectedApiHints, selectedUiHints) : ""}
+    ${state.projectWizardStep === 3 ? renderProjectWizardContractsStep(apiHints, uiHints, sqlHints, ormHints, filteredApiHints, filteredUiHints, filteredSqlHints, filteredOrmHints, selectedApiHints, selectedUiHints, selectedSqlHints, selectedOrmHints) : ""}
     ${state.projectWizardStep === 4 ? renderProjectWizardReviewStep(profile, summary, bootstrapSummary, bootstrapCount, sqlHints, ormHints) : ""}
     ${renderProjectWizardFooter(Boolean(profile))}
   `;
@@ -220,6 +228,8 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="assets" ${state.projectBootstrapOptions.assets ? "checked" : ""} /> bootstrap assets</label>
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="apiHints" ${state.projectBootstrapOptions.apiHints ? "checked" : ""} /> bootstrap API hints</label>
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="uiHints" ${state.projectBootstrapOptions.uiHints ? "checked" : ""} /> bootstrap UI hints</label>
+        <label class="hint"><input type="checkbox" data-project-bootstrap-option="sqlHints" ${state.projectBootstrapOptions.sqlHints ? "checked" : ""} /> bootstrap SQL hints</label>
+        <label class="hint"><input type="checkbox" data-project-bootstrap-option="ormHints" ${state.projectBootstrapOptions.ormHints ? "checked" : ""} /> bootstrap ORM hints</label>
       </div>
       <p class="hint">${escapeHtml(bootstrapSummary)}</p>
       <p class="hint">Default huge-repo path: run metadata-only discovery first, bootstrap from backend/docs, then profile only selected assets.</p>
@@ -355,6 +365,8 @@ function renderProjectWizardContractsStep(
   filteredOrmHints,
   selectedApiHints,
   selectedUiHints,
+  selectedSqlHints,
+  selectedOrmHints,
 ) {
   const PAGE_SIZE = 25;
   const apiPage = paginateProjectDiscovery(filteredApiHints, "api", PAGE_SIZE);
@@ -428,6 +440,11 @@ function renderProjectWizardContractsStep(
     <div class="section">
       <div class="section-actions">
         <h3>Step 3. SQL Structure <span class="hint">(${filteredSqlHints.length} shown / ${sqlHints.length} total)</span></h3>
+        <div class="row-actions">
+          <span class="hint">${formatValue(selectedSqlHints.size)} selected / ${formatValue(sqlHints.length)}</span>
+          <button class="ghost-button" type="button" data-project-sql-select-all="true">Select visible</button>
+          <button class="ghost-button" type="button" data-project-sql-clear="true">Clear</button>
+        </div>
       </div>
       <div class="column-list">
         ${sqlPage.items.length ? sqlPage.items.map((hint) => `
@@ -435,7 +452,9 @@ function renderProjectWizardContractsStep(
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.relation || hint.label || "unknown relation")}</div>
               <div class="row-actions">
+                <label class="hint"><input type="checkbox" data-project-sql-select="${escapeHtml(hint.id)}" ${selectedSqlHints.has(hint.id) ? "checked" : ""} /> select</label>
                 <span class="pill">${escapeHtml(hint.object_type || "table")}</span>
+                <button class="ghost-button" type="button" data-project-sql-create="${escapeHtml(hint.id)}">Create or update</button>
               </div>
             </div>
             <div class="column-meta">${escapeHtml(hint.file || "unknown file")} | ${escapeHtml(hint.detected_from || "sql scan")}</div>
@@ -449,6 +468,11 @@ function renderProjectWizardContractsStep(
     <div class="section">
       <div class="section-actions">
         <h3>Step 3. ORM Structure <span class="hint">(${filteredOrmHints.length} shown / ${ormHints.length} total)</span></h3>
+        <div class="row-actions">
+          <span class="hint">${formatValue(selectedOrmHints.size)} selected / ${formatValue(ormHints.length)}</span>
+          <button class="ghost-button" type="button" data-project-orm-select-all="true">Select visible</button>
+          <button class="ghost-button" type="button" data-project-orm-clear="true">Clear</button>
+        </div>
       </div>
       <div class="column-list">
         ${ormPage.items.length ? ormPage.items.map((hint) => `
@@ -456,7 +480,9 @@ function renderProjectWizardContractsStep(
             <div class="column-head">
               <div class="column-main">${escapeHtml(hint.relation || hint.label || "unknown model")}</div>
               <div class="row-actions">
+                <label class="hint"><input type="checkbox" data-project-orm-select="${escapeHtml(hint.id)}" ${selectedOrmHints.has(hint.id) ? "checked" : ""} /> select</label>
                 <span class="pill">${escapeHtml(hint.object_type || "table")}</span>
+                <button class="ghost-button" type="button" data-project-orm-create="${escapeHtml(hint.id)}">Create or update</button>
               </div>
             </div>
             <div class="column-meta">${escapeHtml(hint.file || "unknown file")} | ${escapeHtml(hint.detected_from || "orm scan")}</div>
@@ -1757,6 +1783,36 @@ function handleProjectProfileClick(event) {
     setStatus("UI selection cleared", "No UI hints are selected.");
     return;
   }
+  if (target.dataset.projectSqlSelectAll) {
+    state.selectedProjectSqlHints = filterProjectHints(
+      state.projectProfile?.sql_structure_hints || [],
+      (hint) => [hint.id, hint.label, hint.relation, hint.object_type, hint.file, ...(hint.upstream_relations || [])],
+    ).map((hint) => hint.id);
+    renderProjectProfile();
+    setStatus("SQL hints selected", `${state.selectedProjectSqlHints.length} SQL hint${state.selectedProjectSqlHints.length === 1 ? "" : "s"} selected for bootstrap.`);
+    return;
+  }
+  if (target.dataset.projectSqlClear) {
+    state.selectedProjectSqlHints = [];
+    renderProjectProfile();
+    setStatus("SQL selection cleared", "No SQL hints are selected.");
+    return;
+  }
+  if (target.dataset.projectOrmSelectAll) {
+    state.selectedProjectOrmHints = filterProjectHints(
+      state.projectProfile?.orm_structure_hints || [],
+      (hint) => [hint.id, hint.label, hint.relation, hint.object_type, hint.file, ...(hint.upstream_relations || [])],
+    ).map((hint) => hint.id);
+    renderProjectProfile();
+    setStatus("ORM hints selected", `${state.selectedProjectOrmHints.length} ORM hint${state.selectedProjectOrmHints.length === 1 ? "" : "s"} selected for bootstrap.`);
+    return;
+  }
+  if (target.dataset.projectOrmClear) {
+    state.selectedProjectOrmHints = [];
+    renderProjectProfile();
+    setStatus("ORM selection cleared", "No ORM hints are selected.");
+    return;
+  }
   if (target.dataset.projectImportSelected) {
     importSelectedProjectSuggestions();
     return;
@@ -1806,6 +1862,14 @@ function handleProjectProfileClick(event) {
   }
   if (target.dataset.projectUiCreate) {
     createUiContractFromHint(target.dataset.projectUiCreate);
+    return;
+  }
+  if (target.dataset.projectSqlCreate) {
+    createSqlStructureFromHint(target.dataset.projectSqlCreate);
+    return;
+  }
+  if (target.dataset.projectOrmCreate) {
+    createOrmStructureFromHint(target.dataset.projectOrmCreate);
     return;
   }
   if (target.dataset.projectImportLoad) {
@@ -1876,6 +1940,16 @@ function handleProjectProfileMutation(event) {
     }
     if (target.dataset.projectUiSelect) {
       state.selectedProjectUiHints = toggleSelectionList(state.selectedProjectUiHints, target.dataset.projectUiSelect, target.checked);
+      renderProjectProfile();
+      return;
+    }
+    if (target.dataset.projectSqlSelect) {
+      state.selectedProjectSqlHints = toggleSelectionList(state.selectedProjectSqlHints, target.dataset.projectSqlSelect, target.checked);
+      renderProjectProfile();
+      return;
+    }
+    if (target.dataset.projectOrmSelect) {
+      state.selectedProjectOrmHints = toggleSelectionList(state.selectedProjectOrmHints, target.dataset.projectOrmSelect, target.checked);
       renderProjectProfile();
     }
     return;
@@ -2057,6 +2131,8 @@ async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
       state.selectedProjectImports = [];
       state.selectedProjectApiHints = [];
       state.selectedProjectUiHints = [];
+      state.selectedProjectSqlHints = [];
+      state.selectedProjectOrmHints = [];
     }
     renderProjectProfile();
     const summary = state.projectProfile?.summary || {};
@@ -2182,6 +2258,8 @@ async function applySelectedProjectPreset() {
     assets: preset.bootstrap_options?.assets !== false,
     apiHints: preset.bootstrap_options?.apiHints !== false,
     uiHints: preset.bootstrap_options?.uiHints !== false,
+    sqlHints: preset.bootstrap_options?.sqlHints !== false,
+    ormHints: preset.bootstrap_options?.ormHints !== false,
   };
   state.projectWizardStep = 2;
   await loadProjectProfileWithOptions({
@@ -2203,9 +2281,13 @@ function applyProjectPresetSelections(preset) {
   );
   const apiHintIds = new Set((state.projectProfile?.api_contract_hints || []).map((hint) => hint.id));
   const uiHintIds = new Set((state.projectProfile?.ui_contract_hints || []).map((hint) => hint.id));
+  const sqlHintIds = new Set((state.projectProfile?.sql_structure_hints || []).map((hint) => hint.id));
+  const ormHintIds = new Set((state.projectProfile?.orm_structure_hints || []).map((hint) => hint.id));
   state.selectedProjectImports = (preset.selected_asset_paths || []).filter((path) => assetPaths.has(path));
   state.selectedProjectApiHints = (preset.selected_api_hint_ids || []).filter((hintId) => apiHintIds.has(hintId));
   state.selectedProjectUiHints = (preset.selected_ui_hint_ids || []).filter((hintId) => uiHintIds.has(hintId));
+  state.selectedProjectSqlHints = (preset.selected_sql_hint_ids || []).filter((hintId) => sqlHintIds.has(hintId));
+  state.selectedProjectOrmHints = (preset.selected_orm_hint_ids || []).filter((hintId) => ormHintIds.has(hintId));
 }
 
 async function saveCurrentProjectPreset() {
@@ -2227,6 +2309,8 @@ async function saveCurrentProjectPreset() {
     selected_asset_paths: [...(state.selectedProjectImports || [])],
     selected_api_hint_ids: [...(state.selectedProjectApiHints || [])],
     selected_ui_hint_ids: [...(state.selectedProjectUiHints || [])],
+    selected_sql_hint_ids: [...(state.selectedProjectSqlHints || [])],
+    selected_orm_hint_ids: [...(state.selectedProjectOrmHints || [])],
   };
   const response = await fetch("/api/onboarding/presets", {
     method: "POST",

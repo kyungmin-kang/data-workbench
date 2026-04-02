@@ -110,9 +110,13 @@ class ProjectBootstrapRequest(BaseModel):
     asset_paths: list[str] = []
     api_hint_ids: list[str] = []
     ui_hint_ids: list[str] = []
+    sql_hint_ids: list[str] = []
+    orm_hint_ids: list[str] = []
     import_assets: bool = True
     import_api_hints: bool = True
     import_ui_hints: bool = True
+    import_sql_hints: bool = True
+    import_orm_hints: bool = True
     actor_type: Literal["human", "agent"] = "human"
 
 

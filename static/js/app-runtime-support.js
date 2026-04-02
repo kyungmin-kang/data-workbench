@@ -772,21 +772,29 @@ async function importProjectBootstrap() {
   const selectedPaths = state.selectedProjectImports || [];
   const selectedApiHints = state.selectedProjectApiHints || [];
   const selectedUiHints = state.selectedProjectUiHints || [];
+  const selectedSqlHints = state.selectedProjectSqlHints || [];
+  const selectedOrmHints = state.selectedProjectOrmHints || [];
   const apiHintIds = selectedApiHints;
   const uiHintIds = selectedUiHints;
+  const sqlHintIds = selectedSqlHints;
+  const ormHintIds = selectedOrmHints;
   const importAssets = state.projectBootstrapOptions.assets
     && (selectedPaths.length > 0 || (state.projectProfile.data_assets || []).some((asset) => asset.suggested_import));
   const importApiHints = state.projectBootstrapOptions.apiHints
     && (selectedApiHints.length > 0 || (state.projectProfile.api_contract_hints || []).length > 0);
   const importUiHints = state.projectBootstrapOptions.uiHints
     && (selectedUiHints.length > 0 || (state.projectProfile.ui_contract_hints || []).length > 0);
+  const importSqlHints = state.projectBootstrapOptions.sqlHints
+    && (selectedSqlHints.length > 0 || (state.projectProfile.sql_structure_hints || []).length > 0);
+  const importOrmHints = state.projectBootstrapOptions.ormHints
+    && (selectedOrmHints.length > 0 || (state.projectProfile.orm_structure_hints || []).length > 0);
 
-  if (!importAssets && !importApiHints && !importUiHints) {
-    setStatus("Bootstrap skipped", "The current discovery does not have importable assets or code hints.");
+  if (!importAssets && !importApiHints && !importUiHints && !importSqlHints && !importOrmHints) {
+    setStatus("Bootstrap skipped", "The current discovery does not have importable assets or structure hints.");
     return;
   }
 
-  setStatus("Bootstrapping graph...", "Importing discovered data assets and code hints into the current graph.");
+  setStatus("Bootstrapping graph...", "Importing discovered data assets, contracts, and structure hints into the current graph.");
   const previousGraph = cloneGraph();
   const response = await fetch("/api/import/project-bootstrap", {
     method: "POST",
@@ -800,9 +808,13 @@ async function importProjectBootstrap() {
       asset_paths: selectedPaths,
       api_hint_ids: apiHintIds,
       ui_hint_ids: uiHintIds,
+      sql_hint_ids: sqlHintIds,
+      orm_hint_ids: ormHintIds,
       import_assets: importAssets,
       import_api_hints: importApiHints,
       import_ui_hints: importUiHints,
+      import_sql_hints: importSqlHints,
+      import_orm_hints: importOrmHints,
     }),
   });
   const payload = await response.json();
@@ -820,8 +832,14 @@ async function importProjectBootstrap() {
   state.selectedProjectImports = [];
   state.selectedProjectApiHints = [];
   state.selectedProjectUiHints = [];
+  state.selectedProjectSqlHints = [];
+  state.selectedProjectOrmHints = [];
   state.selectionMode = "node";
   state.selectedNodeId = payload.imported?.asset_imported?.[0]?.data_node_id
+    || payload.imported?.sql_created?.[0]
+    || payload.imported?.sql_updated?.[0]
+    || payload.imported?.orm_created?.[0]
+    || payload.imported?.orm_updated?.[0]
     || payload.imported?.ui_created?.[0]
     || payload.imported?.ui_updated?.[0]
     || payload.imported?.api_created?.[0]
@@ -835,7 +853,7 @@ async function importProjectBootstrap() {
   render();
   setStatus(
     "Graph bootstrap complete",
-    `${(payload.imported?.asset_imported || []).length} assets imported, ${(payload.imported?.asset_skipped || []).length} skipped, ${(payload.imported?.api_created || []).length + (payload.imported?.api_updated || []).length} API contracts touched, ${(payload.imported?.ui_created || []).length + (payload.imported?.ui_updated || []).length} UI contracts touched.`
+    `${(payload.imported?.asset_imported || []).length} assets imported, ${(payload.imported?.asset_skipped || []).length} skipped, ${(payload.imported?.api_created || []).length + (payload.imported?.api_updated || []).length} API contracts touched, ${(payload.imported?.ui_created || []).length + (payload.imported?.ui_updated || []).length} UI contracts touched, ${(payload.imported?.sql_created || []).length + (payload.imported?.sql_updated || []).length} SQL nodes touched, ${(payload.imported?.orm_created || []).length + (payload.imported?.orm_updated || []).length} ORM nodes touched.`
   );
 }
 
@@ -932,12 +950,28 @@ async function createUiContractFromHint(hintId) {
   await importProjectHint("ui", hintId);
 }
 
+async function createSqlStructureFromHint(hintId) {
+  await importProjectHint("sql", hintId);
+}
+
+async function createOrmStructureFromHint(hintId) {
+  await importProjectHint("orm", hintId);
+}
+
 function getProjectApiHint(hintId) {
   return (state.projectProfile?.api_contract_hints || []).find((hint) => hint.id === hintId) || null;
 }
 
 function getProjectUiHint(hintId) {
   return (state.projectProfile?.ui_contract_hints || []).find((hint) => hint.id === hintId) || null;
+}
+
+function getProjectSqlHint(hintId) {
+  return (state.projectProfile?.sql_structure_hints || []).find((hint) => hint.id === hintId) || null;
+}
+
+function getProjectOrmHint(hintId) {
+  return (state.projectProfile?.orm_structure_hints || []).find((hint) => hint.id === hintId) || null;
 }
 
 function getContractFieldSuggestionKey(nodeId, fieldIndex) {
@@ -981,8 +1015,19 @@ async function importProjectHint(hintKind, hintId) {
   render();
   const detail = hintKind === "api"
     ? `${payload.imported?.node_id || "contract"} ${payload.imported?.created ? "was created" : "was updated"}, ${(payload.imported?.created_field_names || []).length} field(s) added, ${(payload.imported?.binding_summary?.applied || []).length} binding(s) auto-applied.`
-    : `${payload.imported?.node_id || "contract"} linked to ${(payload.imported?.bound_api_node_ids || []).length} API contract(s), created ${(payload.imported?.created_field_names || []).length} field(s), and auto-applied ${(payload.imported?.binding_summary?.applied || []).length} binding(s).`;
-  setStatus(hintKind === "api" ? "API contract ready" : "UI contract ready", detail);
+    : hintKind === "ui"
+      ? `${payload.imported?.node_id || "contract"} linked to ${(payload.imported?.bound_api_node_ids || []).length} API contract(s), created ${(payload.imported?.created_field_names || []).length} field(s), and auto-applied ${(payload.imported?.binding_summary?.applied || []).length} binding(s).`
+      : `${(payload.imported?.created_node_ids || []).length + (payload.imported?.updated_node_ids || []).length} structure node(s) touched and ${(payload.imported?.created_edge_ids || []).length} edge(s) added.`;
+  setStatus(
+    hintKind === "api"
+      ? "API contract ready"
+      : hintKind === "ui"
+        ? "UI contract ready"
+        : hintKind === "sql"
+          ? "SQL structure ready"
+          : "ORM structure ready",
+    detail,
+  );
 }
 
 function loadProjectImportSuggestion(assetPath) {

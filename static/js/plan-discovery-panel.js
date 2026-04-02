@@ -333,6 +333,10 @@ function describeBootstrapScope({
   selectedApiHintCount,
   uiHintCount,
   selectedUiHintCount,
+  sqlHintCount,
+  selectedSqlHintCount,
+  ormHintCount,
+  selectedOrmHintCount,
 }) {
   const parts = [];
   if (state.projectBootstrapOptions.assets) {
@@ -354,6 +358,20 @@ function describeBootstrapScope({
       selectedUiHintCount
         ? `${selectedUiHintCount} selected UI hint${selectedUiHintCount === 1 ? "" : "s"}`
         : `${uiHintCount} available UI hint${uiHintCount === 1 ? "" : "s"}`
+    );
+  }
+  if (state.projectBootstrapOptions.sqlHints) {
+    parts.push(
+      selectedSqlHintCount
+        ? `${selectedSqlHintCount} selected SQL hint${selectedSqlHintCount === 1 ? "" : "s"}`
+        : `${sqlHintCount} available SQL hint${sqlHintCount === 1 ? "" : "s"}`
+    );
+  }
+  if (state.projectBootstrapOptions.ormHints) {
+    parts.push(
+      selectedOrmHintCount
+        ? `${selectedOrmHintCount} selected ORM hint${selectedOrmHintCount === 1 ? "" : "s"}`
+        : `${ormHintCount} available ORM hint${ormHintCount === 1 ? "" : "s"}`
     );
   }
   if (!parts.length) {
@@ -384,4 +402,3 @@ function renderIssueItems(items, options = {}) {
     `;
   }).join("");
 }
-

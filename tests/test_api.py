@@ -1705,10 +1705,14 @@ def token_scan_two():
                         "assets": True,
                         "apiHints": True,
                         "uiHints": False,
+                        "sqlHints": True,
+                        "ormHints": False,
                     },
                     "selected_asset_paths": ["data/demo/fred_home_price.csv"],
                     "selected_api_hint_ids": ["api:frontend-routes-py:get-api-custom-pricing"],
                     "selected_ui_hint_ids": [],
+                    "selected_sql_hint_ids": ["sql:analytics.market_signals"],
+                    "selected_orm_hint_ids": [],
                 }
             },
         )
@@ -1723,6 +1727,8 @@ def token_scan_two():
         self.assertEqual(presets[0]["name"], "Local Housing Import")
         self.assertFalse(presets[0]["include_internal"])
         self.assertFalse(presets[0]["bootstrap_options"]["uiHints"])
+        self.assertTrue(presets[0]["bootstrap_options"]["sqlHints"])
+        self.assertFalse(presets[0]["bootstrap_options"]["ormHints"])
 
         update_response = self.client.post(
             "/api/onboarding/presets",
@@ -1734,6 +1740,8 @@ def token_scan_two():
                         "assets": False,
                         "apiHints": True,
                         "uiHints": True,
+                        "sqlHints": False,
+                        "ormHints": True,
                     },
                 }
             },
@@ -1743,6 +1751,8 @@ def token_scan_two():
         self.assertEqual(updated["description"], "Updated preset description.")
         self.assertFalse(updated["bootstrap_options"]["assets"])
         self.assertTrue(updated["bootstrap_options"]["uiHints"])
+        self.assertFalse(updated["bootstrap_options"]["sqlHints"])
+        self.assertTrue(updated["bootstrap_options"]["ormHints"])
 
         delete_response = self.client.delete(f"/api/onboarding/presets/{updated['id']}")
         self.assertEqual(delete_response.status_code, 200)
@@ -1967,6 +1977,165 @@ export async function CustomMarketDashboard() {
         self.assertEqual(median_field["sources"][0]["node_id"], "contract:api.market_snapshot")
         self.assertEqual(median_field["sources"][0]["field"], "median_home_price")
         self.assertTrue(payload["imported"]["binding_summary"]["applied"])
+
+    def test_import_project_hint_supports_sql_and_orm_structure_hints(self) -> None:
+        sql_dir = self.root / "sql"
+        backend_dir = self.root / "backend"
+        sql_dir.mkdir(parents=True, exist_ok=True)
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (sql_dir / "market_signals.sql").write_text(
+            """
+create table analytics.market_inputs (
+    market text,
+    median_home_price numeric
+);
+
+create materialized view analytics.market_signals as
+select
+    inputs.market as market,
+    inputs.median_home_price as pricing_score
+from analytics.market_inputs as inputs;
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Integer, Numeric, String
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column
+
+Base = declarative_base()
+
+class MarketSnapshot(Base):
+    __tablename__ = "market_snapshots"
+    __table_args__ = {"schema": "analytics"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    market: Mapped[str] = mapped_column(String(32))
+    pricing_score: Mapped[float] = mapped_column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        profile_response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(profile_response.status_code, 200)
+        project_profile = profile_response.json()["project_profile"]
+        sql_hint = next(
+            hint for hint in project_profile["sql_structure_hints"] if hint["relation"] == "analytics.market_signals"
+        )
+        orm_hint = next(
+            hint for hint in project_profile["orm_structure_hints"] if hint["relation"] == "analytics.market_snapshots"
+        )
+
+        graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
+        sql_response = self.client.post(
+            "/api/import/project-hint",
+            json={
+                "graph": graph,
+                "hint_kind": "sql",
+                "hint_id": sql_hint["id"],
+            },
+        )
+        self.assertEqual(sql_response.status_code, 200)
+        sql_payload = sql_response.json()
+        sql_nodes = {node["id"]: node for node in sql_payload["graph"]["nodes"]}
+        self.assertIn("compute:transform.analytics_market_signals", sql_nodes)
+        self.assertIn("data:analytics_market_signals", sql_nodes)
+        self.assertTrue(
+            any(
+                edge["type"] == "produces"
+                and edge["source"] == "compute:transform.analytics_market_signals"
+                and edge["target"] == "data:analytics_market_signals"
+                for edge in sql_payload["graph"]["edges"]
+            )
+        )
+
+        orm_response = self.client.post(
+            "/api/import/project-hint",
+            json={
+                "graph": sql_payload["graph"],
+                "hint_kind": "orm",
+                "hint_id": orm_hint["id"],
+            },
+        )
+        self.assertEqual(orm_response.status_code, 200)
+        orm_payload = orm_response.json()
+        orm_nodes = {node["id"]: node for node in orm_payload["graph"]["nodes"]}
+        self.assertIn("data:analytics_market_snapshots", orm_nodes)
+        self.assertEqual(orm_payload["imported"]["node_id"], "data:analytics_market_snapshots")
+
+    def test_project_bootstrap_endpoint_imports_selected_sql_and_orm_hints(self) -> None:
+        sql_dir = self.root / "sql"
+        backend_dir = self.root / "backend"
+        sql_dir.mkdir(parents=True, exist_ok=True)
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (sql_dir / "market_signals.sql").write_text(
+            """
+create table analytics.market_inputs (
+    market text,
+    median_home_price numeric
+);
+
+create materialized view analytics.market_signals as
+select
+    inputs.market as market,
+    inputs.median_home_price as pricing_score
+from analytics.market_inputs as inputs;
+""".strip(),
+            encoding="utf-8",
+        )
+        (backend_dir / "models.py").write_text(
+            """
+from sqlalchemy import Integer, Numeric, String
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column
+
+Base = declarative_base()
+
+class MarketSnapshot(Base):
+    __tablename__ = "market_snapshots"
+    __table_args__ = {"schema": "analytics"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    market: Mapped[str] = mapped_column(String(32))
+    pricing_score: Mapped[float] = mapped_column(Numeric)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        profile_response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(profile_response.status_code, 200)
+        project_profile = profile_response.json()["project_profile"]
+        sql_hint_id = next(
+            hint["id"] for hint in project_profile["sql_structure_hints"] if hint["relation"] == "analytics.market_signals"
+        )
+        orm_hint_id = next(
+            hint["id"] for hint in project_profile["orm_structure_hints"] if hint["relation"] == "analytics.market_snapshots"
+        )
+
+        graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
+        response = self.client.post(
+            "/api/import/project-bootstrap",
+            json={
+                "graph": graph,
+                "include_internal": False,
+                "sql_hint_ids": [sql_hint_id],
+                "orm_hint_ids": [orm_hint_id],
+                "import_assets": False,
+                "import_api_hints": False,
+                "import_ui_hints": False,
+                "import_sql_hints": True,
+                "import_orm_hints": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["imported"]["selection"]["sql_hint_ids"], [sql_hint_id])
+        self.assertEqual(payload["imported"]["selection"]["orm_hint_ids"], [orm_hint_id])
+        self.assertTrue(payload["imported"]["sql_created"])
+        self.assertTrue(payload["imported"]["orm_created"])
+        nodes = {node["id"]: node for node in payload["graph"]["nodes"]}
+        self.assertIn("data:analytics_market_signals", nodes)
+        self.assertIn("compute:transform.analytics_market_signals", nodes)
+        self.assertIn("data:analytics_market_snapshots", nodes)
 
     def test_project_bootstrap_endpoint_imports_selected_assets_and_hints(self) -> None:
         backend_dir = self.root / "backend"

@@ -55,6 +55,8 @@ const state = {
   selectedProjectImports: [],
   selectedProjectApiHints: [],
   selectedProjectUiHints: [],
+  selectedProjectSqlHints: [],
+  selectedProjectOrmHints: [],
   onboardingPresets: [],
   selectedProjectPresetId: "",
   projectPresetDraft: {
@@ -75,6 +77,8 @@ const state = {
     assets: true,
     apiHints: true,
     uiHints: true,
+    sqlHints: true,
+    ormHints: true,
   },
   projectProfileFilters: {
     assetsQuery: "",
