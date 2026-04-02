@@ -2121,3 +2121,68 @@ def create_green():
         self.assertEqual(len({hint["id"] for hint in green_hints}), len(green_hints))
         self.assertTrue(all(hint["id"].startswith("api:") for hint in green_hints))
         self.assertIn("POST /", {hint["route"] for hint in green_hints})
+
+    def test_project_profile_composes_api_router_prefixes_into_route_hints(self) -> None:
+        orgs_dir = self.root / "backend" / "api" / "features" / "orgs"
+        orgs_dir.mkdir(parents=True, exist_ok=True)
+        (orgs_dir / "routes.py").write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/orgs")
+
+@router.get("/me")
+def current_org():
+    return {"ok": True}
+
+@router.post("/bootstrap")
+def bootstrap_org():
+    return {"ok": True}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        tours_dir = self.root / "backend" / "api" / "features" / "tours"
+        tours_dir.mkdir(parents=True, exist_ok=True)
+        (tours_dir / "routes.py").write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/tours")
+
+@router.post("/clients")
+def create_client():
+    return {"ok": True}
+
+@router.get("/{tour_id}")
+def get_tour(tour_id: str):
+    return {"tour_id": tour_id}
+
+@router.post("")
+def create_tour():
+    return {"ok": True}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+
+        orgs_hints = [
+            hint for hint in payload["api_contract_hints"]
+            if hint["file"].endswith("backend/api/features/orgs/routes.py")
+        ]
+        self.assertEqual(
+            {hint["route"] for hint in orgs_hints},
+            {"GET /api/orgs/me", "POST /api/orgs/bootstrap"},
+        )
+
+        tours_hints = [
+            hint for hint in payload["api_contract_hints"]
+            if hint["file"].endswith("backend/api/features/tours/routes.py")
+        ]
+        self.assertEqual(
+            {hint["route"] for hint in tours_hints},
+            {"POST /api/tours/clients", "GET /api/tours/{tour_id}", "POST /api/tours/"},
+        )

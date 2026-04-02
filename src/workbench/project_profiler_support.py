@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .store import get_cache_dir
 
-PROJECT_PROFILE_CACHE_VERSION = "5"
+PROJECT_PROFILE_CACHE_VERSION = "6"
 DEFAULT_IGNORED_PARTS = {
     ".git",
     ".venv",

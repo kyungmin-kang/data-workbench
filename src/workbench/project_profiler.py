@@ -1217,11 +1217,12 @@ def extract_api_contract_hints_from_python(
     helper_relation_templates = imported_helper_relations | helper_relation_templates
     helper_templates = imported_helper_templates | helper_templates
     object_templates = imported_object_templates | object_templates
+    router_prefixes = collect_router_prefixes(tree)
     hints: list[dict] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        decorators = extract_route_decorators(node)
+        decorators = extract_route_decorators(node, router_prefixes=router_prefixes)
         if not decorators:
             continue
 
@@ -1637,8 +1638,51 @@ def class_looks_like_constructor_model(node: ast.ClassDef) -> bool:
     return False
 
 
-def extract_route_decorators(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, str]]:
+def collect_router_prefixes(tree: ast.AST) -> dict[str, str]:
+    router_prefixes: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+            value = node.value
+        else:
+            continue
+        if not targets or not isinstance(value, ast.Call):
+            continue
+        constructor_name = get_ast_name(value.func).split(".")[-1]
+        if constructor_name != "APIRouter":
+            continue
+        prefix = ""
+        for keyword in value.keywords:
+            if keyword.arg != "prefix":
+                continue
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                prefix = normalize_api_hint_path(keyword.value.value)
+            break
+        for target in targets:
+            router_prefixes[target] = prefix
+    return router_prefixes
+
+
+def compose_router_prefixed_path(prefix: str, path: str) -> str:
+    normalized_prefix = normalize_api_hint_path(prefix)
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        return normalized_prefix if normalized_prefix.endswith("/") else f"{normalized_prefix}/"
+    if normalized_path == "/":
+        return normalized_prefix if normalized_prefix.endswith("/") else f"{normalized_prefix}/"
+    return f"{normalized_prefix.rstrip('/')}/{normalized_path.lstrip('/')}"
+
+
+def extract_route_decorators(
+    function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    router_prefixes: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     decorators: list[dict[str, str]] = []
+    router_prefixes = router_prefixes or {}
     for decorator in function_node.decorator_list:
         if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
             continue
@@ -1648,6 +1692,8 @@ def extract_route_decorators(function_node: ast.FunctionDef | ast.AsyncFunctionD
         if not decorator.args or not isinstance(decorator.args[0], ast.Constant) or not isinstance(decorator.args[0].value, str):
             continue
         path = decorator.args[0].value
+        router_name = decorator.func.value.id if isinstance(decorator.func.value, ast.Name) else ""
+        path = compose_router_prefixed_path(router_prefixes.get(router_name, ""), path) if router_name in router_prefixes else path
         response_model = ""
         for keyword in decorator.keywords:
             if keyword.arg == "response_model":

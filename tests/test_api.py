@@ -1219,7 +1219,7 @@ paths:
         self.assertEqual(payload["root"], str(self.root))
         self.assertEqual(payload["summary"]["profiling_mode"], "metadata_only")
         self.assertEqual(payload["cache"]["profiling_mode"], "metadata_only")
-        self.assertEqual(payload["cache"]["version"], "5")
+        self.assertEqual(payload["cache"]["version"], "6")
         self.assertGreaterEqual(payload["summary"]["data_assets"], 1)
         self.assertGreaterEqual(payload["summary"]["import_suggestions"], 1)
         self.assertGreaterEqual(payload["summary"]["api_contract_hints"], 1)
