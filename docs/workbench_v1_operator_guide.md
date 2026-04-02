@@ -59,9 +59,19 @@ Recommended first dogfood loop for a large external repo:
 
 1. Start the workbench with a sidecar workspace root.
 2. Run project profiling against the target repo or a serving-relevant subroot.
-3. Bootstrap the graph from the highest-signal backend/API/docs inputs first.
+3. Bootstrap the graph from the highest-signal backend/API/docs/SQL/ORM inputs first.
 4. Save the graph and inspect the latest plan.
 5. Add execution tasks, blockers, and decisions before widening the scan scope.
+
+Treat that first pass as a baseline, not a finished model. The discovery scan is meant to be cheap and stable; the follow-up completion pass can be more thoughtful.
+
+Recommended joint human+agent loop for onboarding:
+
+1. Human chooses scope and exclusions for a fast discovery run.
+2. Workbench discovery produces the first importable baseline.
+3. Human bootstraps the highest-signal objects into the graph.
+4. Scout or architect/scout agents inspect selected files, docs, routes, relations, and raw-file origins to complete what discovery missed.
+5. Structural gaps or uncertainty become reviewable findings, not silent edits.
 
 Project profiling is intentionally conservative for large repos:
 
@@ -86,6 +96,7 @@ If a repo has giant raw-data or ingestion trees, exclude them during the first p
 - All execution writes use revision checks.
 - Evidence should prove specific acceptance checks, not act as an unstructured dump.
 - Blockers should stay structured so handoff and triage remain clear.
+- Agents should treat onboarding as a joint completion task, not as a one-shot scan command.
 
 ## Recommended day-to-day rhythm
 

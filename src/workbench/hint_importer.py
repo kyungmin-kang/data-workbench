@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from .binding_suggestions import format_source_ref, suggest_contract_field_source
 from .structure_blueprints import (
     build_orm_query_projection_compute_node_from_hint,
     build_orm_query_projection_data_node_from_hint,
+    build_source_node_from_import_spec,
     build_sql_compute_node_from_hint,
     build_sql_data_node_from_hint,
 )
 from .structure_reconciliation import (
     build_edge,
+    match_source_node_id,
     match_orm_query_compute_node_id,
     match_orm_query_data_node_id,
     match_sql_compute_node_id,
@@ -164,8 +167,13 @@ def upsert_sql_structure_from_hint(graph: dict[str, Any], hint: dict[str, Any]) 
     created_edge_ids: list[str] = []
 
     data_node = _ensure_sql_relation_node(graph, hint, created_node_ids, updated_node_ids)
+    source_node = _ensure_hint_file_source_node(graph, hint)
     node_id = data_node["id"]
     if object_type not in {"view", "materialized_view"}:
+        if source_node is not None:
+            edge_result = _ensure_graph_edge(graph, "ingests", source_node["id"], data_node["id"], hint.get("file", "project survey"))
+            if edge_result["created"]:
+                created_edge_ids.append(edge_result["edge_id"])
         for upstream_relation in hint.get("upstream_relations", []) or []:
             upstream_node = _ensure_upstream_sql_relation_node(graph, upstream_relation)
             edge_result = _ensure_graph_edge(graph, "depends_on", upstream_node["id"], data_node["id"], hint.get("file", "project survey"))
@@ -181,6 +189,10 @@ def upsert_sql_structure_from_hint(graph: dict[str, Any], hint: dict[str, Any]) 
 
     compute_node = _ensure_sql_compute_node(graph, hint, data_node["id"], created_node_ids, updated_node_ids)
     node_id = compute_node["id"]
+    if source_node is not None:
+        edge_result = _ensure_graph_edge(graph, "ingests", source_node["id"], compute_node["id"], hint.get("file", "project survey"))
+        if edge_result["created"]:
+            created_edge_ids.append(edge_result["edge_id"])
     edge_result = _ensure_graph_edge(graph, "produces", compute_node["id"], data_node["id"], hint.get("file", "project survey"))
     if edge_result["created"]:
         created_edge_ids.append(edge_result["edge_id"])
@@ -215,6 +227,11 @@ def upsert_orm_structure_from_hint(graph: dict[str, Any], hint: dict[str, Any]) 
 
     data_node = _ensure_orm_query_data_node(graph, hint, created_node_ids, updated_node_ids)
     compute_node = _ensure_orm_query_compute_node(graph, hint, data_node["id"], created_node_ids, updated_node_ids)
+    source_node = _ensure_hint_file_source_node(graph, hint)
+    if source_node is not None:
+        edge_result = _ensure_graph_edge(graph, "ingests", source_node["id"], compute_node["id"], hint.get("file", "project survey"))
+        if edge_result["created"]:
+            created_edge_ids.append(edge_result["edge_id"])
     edge_result = _ensure_graph_edge(graph, "produces", compute_node["id"], data_node["id"], hint.get("file", "project survey"))
     if edge_result["created"]:
         created_edge_ids.append(edge_result["edge_id"])
@@ -507,6 +524,35 @@ def _ensure_sql_relation_node(
     else:
         updated_node_ids.append(node["id"])
     _merge_sql_columns(node, hint.get("fields", []) or [])
+    return node
+
+
+def _ensure_hint_file_source_node(graph: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
+    file_path = str(hint.get("file") or "").strip()
+    if not file_path:
+        return None
+    import_spec = {
+        "source_label": f"{Path(file_path).name} Source",
+        "source_extension_type": "disk_path",
+        "source_description": f"Imported from structure hint: {file_path}",
+        "source_provider": "local",
+        "source_refresh": "",
+        "source_origin_kind": "disk_path",
+        "source_origin_value": file_path,
+        "source_series_id": "",
+        "raw_asset_label": Path(file_path).name,
+        "raw_asset_kind": "file",
+        "raw_asset_format": "unknown",
+        "raw_asset_value": file_path,
+        "profile_ready": False,
+    }
+    node_id = match_source_node_id(graph, import_spec)
+    node = next((candidate for candidate in graph.get("nodes", []) if candidate["id"] == node_id), None) if node_id else None
+    if node is not None:
+        return node
+    node = build_source_node_from_import_spec(import_spec)
+    node["notes"] = f"Imported from structure hint: {file_path}"
+    graph.setdefault("nodes", []).append(node)
     return node
 
 

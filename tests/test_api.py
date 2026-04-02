@@ -2038,6 +2038,10 @@ class MarketSnapshot(Base):
         self.assertEqual(sql_response.status_code, 200)
         sql_payload = sql_response.json()
         sql_nodes = {node["id"]: node for node in sql_payload["graph"]["nodes"]}
+        sql_source_node = next(
+            node for node in sql_payload["graph"]["nodes"]
+            if node["kind"] == "source" and node.get("source", {}).get("origin", {}).get("value") == "sql/market_signals.sql"
+        )
         self.assertIn("compute:transform.analytics_market_signals", sql_nodes)
         self.assertIn("data:analytics_market_signals", sql_nodes)
         self.assertTrue(
@@ -2045,6 +2049,14 @@ class MarketSnapshot(Base):
                 edge["type"] == "produces"
                 and edge["source"] == "compute:transform.analytics_market_signals"
                 and edge["target"] == "data:analytics_market_signals"
+                for edge in sql_payload["graph"]["edges"]
+            )
+        )
+        self.assertTrue(
+            any(
+                edge["type"] == "ingests"
+                and edge["source"] == sql_source_node["id"]
+                and edge["target"] == "compute:transform.analytics_market_signals"
                 for edge in sql_payload["graph"]["edges"]
             )
         )
@@ -2062,6 +2074,13 @@ class MarketSnapshot(Base):
         orm_nodes = {node["id"]: node for node in orm_payload["graph"]["nodes"]}
         self.assertIn("data:analytics_market_snapshots", orm_nodes)
         self.assertEqual(orm_payload["imported"]["node_id"], "data:analytics_market_snapshots")
+        self.assertTrue(
+            any(
+                node["kind"] == "source"
+                and node.get("source", {}).get("origin", {}).get("value") == "backend/models.py"
+                for node in orm_payload["graph"]["nodes"]
+            )
+        )
 
     def test_project_bootstrap_endpoint_imports_selected_sql_and_orm_hints(self) -> None:
         sql_dir = self.root / "sql"
@@ -2136,6 +2155,20 @@ class MarketSnapshot(Base):
         self.assertIn("data:analytics_market_signals", nodes)
         self.assertIn("compute:transform.analytics_market_signals", nodes)
         self.assertIn("data:analytics_market_snapshots", nodes)
+        self.assertTrue(
+            any(
+                node["kind"] == "source"
+                and node.get("source", {}).get("origin", {}).get("value") == "sql/market_signals.sql"
+                for node in payload["graph"]["nodes"]
+            )
+        )
+        self.assertTrue(
+            any(
+                node["kind"] == "source"
+                and node.get("source", {}).get("origin", {}).get("value") == "backend/models.py"
+                for node in payload["graph"]["nodes"]
+            )
+        )
 
     def test_project_bootstrap_endpoint_imports_selected_assets_and_hints(self) -> None:
         backend_dir = self.root / "backend"

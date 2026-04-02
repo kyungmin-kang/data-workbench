@@ -137,6 +137,21 @@ Recommended first loop:
 
 The onboarding-specific walkthrough is in [`docs/onboarding_wizard_quickstart.md`](docs/onboarding_wizard_quickstart.md).
 
+## Recommended large-repo onboarding loop
+
+For large or messy repos, treat onboarding as a joint human+agent modeling pass:
+
+1. Run metadata-first discovery to get a fast baseline.
+2. Bootstrap the highest-signal findings first:
+   - selected assets
+   - API/UI contracts
+   - SQL/ORM structure
+3. Keep the imported origin and raw-file context when discovery can identify a defining file.
+4. Save the graph and inspect what is still missing or too noisy.
+5. Then use a scout or architect/scout agent pass to inspect selected objects, files, docs, and routes and help complete the model.
+
+The important default is: discovery is the fast first pass, not the final answer. Agents should help complete and review the model, not just rerun discovery and stop.
+
 ## What to expect in preview
 
 - The Docker-first path is the main supported way to run the workbench right now.
@@ -156,6 +171,13 @@ The workbench is usable without agents. When you do use agents, the intended rea
 - `/api/agent-contracts/{id}/launch`
 
 Agents should update execution state, open scans, and participate in review, but they should not mutate canonical structure directly.
+
+For onboarding and large-repo discovery, the intended agent behavior is collaborative:
+
+- let deterministic discovery create the cheap baseline
+- inspect selected files, relations, docs, and routes to fill in what the baseline missed
+- package missing structure as reviewable proposals, notes, blockers, or follow-up tasks
+- do not assume the first scan is complete just because it ran successfully
 
 See [`docs/workbench_v1_operator_guide.md`](docs/workbench_v1_operator_guide.md) for the day-to-day human and agent operating loop.
 
