@@ -39,7 +39,7 @@ class BootstrapVenvScriptTests(unittest.TestCase):
             make_fake_python(temp_path, "python3", "3.8")
             chosen = make_fake_python(temp_path, "python3.11", "3.11")
             env = os.environ.copy()
-            env["PATH"] = f"{temp_path}:/usr/bin:/bin"
+            env["PATH"] = str(temp_path)
             result = subprocess.run(
                 ["/bin/bash", str(SCRIPT_PATH), "--dry-run"],
                 capture_output=True,
@@ -56,7 +56,7 @@ class BootstrapVenvScriptTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             old_python = make_fake_python(temp_path, "python3", "3.8")
             env = os.environ.copy()
-            env["PATH"] = f"{temp_path}:/usr/bin:/bin"
+            env["PATH"] = str(temp_path)
             result = subprocess.run(
                 ["/bin/bash", str(SCRIPT_PATH), "--dry-run"],
                 capture_output=True,
