@@ -55,6 +55,7 @@ def parse_markdown_hybrid_plan(path: Path, text: str) -> dict[str, Any] | None:
                     "response_fields": [field["name"] for field in descriptor["fields"]],
                 }
             )
+            node["tags"] = sorted(set([*(node.get("tags", []) or []), "plan_markdown"]))
             field_by_name = {field.get("name"): field for field in node.get("contract", {}).get("fields", [])}
             for field_spec in descriptor["fields"]:
                 field = field_by_name.get(field_spec["name"])
@@ -88,6 +89,7 @@ def parse_markdown_hybrid_plan(path: Path, text: str) -> dict[str, Any] | None:
                     "used_fields": [field["name"] for field in descriptor["fields"]],
                 }
             )
+            node["tags"] = sorted(set([*(node.get("tags", []) or []), "plan_markdown"]))
             field_by_name = {field.get("name"): field for field in node.get("contract", {}).get("fields", [])}
             for field_spec in descriptor["fields"]:
                 field = field_by_name.get(field_spec["name"])
@@ -110,6 +112,7 @@ def parse_markdown_hybrid_plan(path: Path, text: str) -> dict[str, Any] | None:
                     ],
                 }
             )
+            node["tags"] = sorted(set([*(node.get("tags", []) or []), "plan_markdown"]))
             column_by_name = {column.get("name"): column for column in node.get("columns", [])}
             for field_spec in descriptor["fields"]:
                 column = column_by_name.get(field_spec["name"])
@@ -272,7 +275,10 @@ def parse_markdown_section_descriptor(title: str, body: str) -> dict[str, Any] |
         prefix = data_match.group("prefix").lower().replace("_", " ")
         relation = normalize_markdown_value(data_match.group("value"))
         object_type = "materialized_view" if "materialized" in prefix else "view" if prefix == "view" else "table"
-        return {"kind": "data", "relation": relation, "object_type": object_type, "fields": extract_markdown_field_specs(body, contract_kind="data")}
+        fields = extract_markdown_field_specs(body, contract_kind="data")
+        if not fields and not looks_like_markdown_relation_name(relation):
+            return None
+        return {"kind": "data", "relation": relation, "object_type": object_type, "fields": fields}
 
     compute_match = MARKDOWN_COMPUTE_HEADING_RE.match(title)
     if compute_match:
@@ -295,6 +301,17 @@ def parse_markdown_section_descriptor(title: str, body: str) -> dict[str, Any] |
         }
 
     return None
+
+
+def looks_like_markdown_relation_name(value: str) -> bool:
+    relation = normalize_markdown_value(value)
+    if not relation:
+        return False
+    if relation.lower() in {"flow", "quality notes", "ingestion scripts"}:
+        return False
+    if " " in relation and not any(token in relation for token in (".", "_", "-", "/")):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/\-\s]+", relation))
 
 
 def extract_markdown_route(text: str) -> str:

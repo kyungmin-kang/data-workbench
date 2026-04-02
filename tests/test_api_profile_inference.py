@@ -2044,3 +2044,80 @@ export async function MarketDashboard() {
             ["medianHomePrice", "pricingScore", "rentIndex"],
         )
 
+    def test_project_profile_infers_ui_routes_from_template_literals_and_simple_builders(self) -> None:
+        frontend_dir = self.root / "frontend"
+        frontend_dir.mkdir(parents=True, exist_ok=True)
+        (frontend_dir / "MarketMapEmbed.tsx").write_text(
+            """
+const endpoint = "/api/maps/market-embed";
+const aliasEndpoint = endpoint;
+const buildSearchRoute = (slug) => `/api/search/${slug}`;
+
+export async function MarketMapEmbed({ marketSlug }) {
+  const response = await fetch(`${config.apiUrl}${aliasEndpoint}`, {
+    method: "GET",
+  });
+  const payload = await response.json();
+  await fetch(buildSearchRoute(marketSlug));
+  return `${payload.pricingScore}`;
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        (frontend_dir / "DynamicOnly.tsx").write_text(
+            """
+export async function DynamicOnly({ endpoint }) {
+  return fetch(endpoint);
+}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+
+        hint = next(hint for hint in payload["ui_contract_hints"] if hint["component"] == "MarketMapEmbed")
+        self.assertEqual(hint["api_routes"], ["/api/maps/market-embed", "/api/search/${slug}"])
+        self.assertEqual(hint["route_field_hints"]["/api/maps/market-embed"], ["pricingScore"])
+        self.assertFalse(any(hint["component"] == "DynamicOnly" for hint in payload["ui_contract_hints"]))
+
+    def test_project_profile_builds_collision_safe_api_hint_ids_and_normalizes_empty_paths(self) -> None:
+        backend_dir = self.root / "backend" / "api" / "features" / "green"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        (backend_dir / "routes.py").write_text(
+            """
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/buildings/{building_slug}/green")
+def building_green():
+    return {"scope": "building"}
+
+@router.get("/boroughs/{borough_slug}/green")
+def borough_green():
+    return {"scope": "borough"}
+
+@router.get("/areas/{area_kind}/{area_slug}/green")
+def area_green():
+    return {"scope": "area"}
+
+@router.post("")
+def create_green():
+    return {"ok": True}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile?include_internal=false")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+
+        green_hints = [
+            hint for hint in payload["api_contract_hints"]
+            if hint["file"].endswith("backend/api/features/green/routes.py")
+        ]
+        self.assertEqual(len({hint["id"] for hint in green_hints}), len(green_hints))
+        self.assertTrue(all(hint["id"].startswith("api:") for hint in green_hints))
+        self.assertIn("POST /", {hint["route"] for hint in green_hints})

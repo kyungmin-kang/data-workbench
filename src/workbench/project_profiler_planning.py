@@ -88,6 +88,22 @@ def summarize_planning_hints(root_dir: Path) -> dict[str, list[dict[str, Any]]]:
                 relation = extract_sql_relation_tag(node)
                 if not relation:
                     continue
+                fields = [
+                    {
+                        "name": column.get("name", ""),
+                        "data_type": column.get("data_type", "unknown"),
+                        "required": column.get("required", True),
+                        "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
+                    }
+                    for column in node.get("columns", [])
+                    if column.get("name") and not column.get("removed")
+                ]
+                if (
+                    not fields
+                    and "plan_markdown" in (node.get("tags", []) or [])
+                    and not looks_like_planning_relation_name(relation)
+                ):
+                    continue
                 data_hints.append(
                     {
                         "id": node["id"],
@@ -95,16 +111,7 @@ def summarize_planning_hints(root_dir: Path) -> dict[str, list[dict[str, Any]]]:
                         "relation": relation,
                         "object_type": node.get("extension_type", "table"),
                         "detected_from": "plan_structure",
-                        "fields": [
-                            {
-                                "name": column.get("name", ""),
-                                "data_type": column.get("data_type", "unknown"),
-                                "required": column.get("required", True),
-                                "source_fields": resolve_plan_source_fields(plan_graph, column.get("lineage_inputs", [])),
-                            }
-                            for column in node.get("columns", [])
-                            if column.get("name") and not column.get("removed")
-                        ],
+                        "fields": fields,
                     }
                 )
                 continue
@@ -214,3 +221,14 @@ def _humanize_asset_name(path: str) -> str:
             normalized = Path(filename).stem
     cleaned = normalized.replace("_", " ").replace("-", " ").strip()
     return cleaned.title() or "Imported Asset"
+
+
+def looks_like_planning_relation_name(value: str) -> bool:
+    relation = str(value or "").strip()
+    if not relation:
+        return False
+    if relation.lower() in {"flow", "quality notes", "ingestion scripts"}:
+        return False
+    if " " in relation and not any(token in relation for token in (".", "_", "-", "/")):
+        return False
+    return True

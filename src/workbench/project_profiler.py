@@ -4,6 +4,7 @@ import ast
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,27 @@ SQL_HINT_SUFFIXES = {".sql"}
 FASTAPI_ROUTE_RE = re.compile(r"@\s*(?:\w+\.)?(get|post|put|patch|delete)\(\s*[\"'](/[^\"']+)[\"']")
 FETCH_ROUTE_RE = re.compile(r"fetch\(\s*[\"'`](\/api\/[^\"'`]+)[\"'`]")
 AXIOS_ROUTE_RE = re.compile(r"axios\.(?:get|post|put|patch|delete)\(\s*[\"'`](\/api\/[^\"'`]+)[\"'`]")
+JS_ASSIGNMENT_RE = re.compile(r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?);", re.DOTALL)
+JS_FUNCTION_RETURN_RE = re.compile(
+    r"(?:export\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{[\s\S]{0,240}?return\s+(.+?);[\s\S]{0,80}?\}",
+    re.DOTALL,
+)
+JS_ARROW_FUNCTION_RETURN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*(?:\{[\s\S]{0,240}?return\s+(.+?);[\s\S]{0,80}?\}|(.+?));",
+    re.DOTALL,
+)
+UI_CALL_START_RE = re.compile(r"\b(fetch|axios\.(?:get|post|put|patch|delete))\s*\(")
+ASYNC_CALL_ASSIGN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*await\s+(fetch|axios\.(?:get|post|put|patch|delete))\s*\(",
+    re.MULTILINE,
+)
+AXIOS_DATA_CALL_ASSIGN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\(\s*await\s+axios\.(?:get|post|put|patch|delete)\s*\(",
+    re.MULTILINE,
+)
+RESPONSE_DATA_ASSIGN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\.data\b",
+)
 EXPORTED_COMPONENT_RE = re.compile(r"export\s+(?:default\s+)?function\s+([A-Z][A-Za-z0-9_]*)")
 FUNCTION_COMPONENT_RE = re.compile(r"\bfunction\s+([A-Z][A-Za-z0-9_]*)\s*\(")
 CONST_COMPONENT_RE = re.compile(r"\bconst\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(")
@@ -1067,14 +1089,15 @@ def extract_api_contract_hints(
 
     hints: list[dict] = []
     for method, route in FASTAPI_ROUTE_RE.findall(text):
-        route_signature = f"{method.upper()} {route}"
+        normalized_path = normalize_api_hint_path(route)
+        route_signature = build_api_route_signature(method.upper(), normalized_path)
         hints.append(
             {
-                "id": build_hint_id("api", relative_path, route_signature),
+                "id": build_api_hint_id(relative_path, method.upper(), normalized_path),
                 "label": route_signature,
                 "method": method.upper(),
                 "route": route_signature,
-                "path": route,
+                "path": normalized_path,
                 "file": relative_path,
                 "detected_from": "fastapi_decorator",
                 "description": f"Detected from {relative_path}",
@@ -1086,12 +1109,13 @@ def extract_api_contract_hints(
 
 
 def extract_ui_contract_hints(relative_path: str, text: str) -> list[dict]:
-    api_routes = sorted(set(FETCH_ROUTE_RE.findall(text)) | set(AXIOS_ROUTE_RE.findall(text)))
+    variable_routes, function_routes = collect_ui_route_definitions(text)
+    api_routes = sorted(set(collect_ui_call_routes(text, variable_routes, function_routes)))
     if not api_routes:
         return []
 
     component_names = detect_component_names(relative_path, text)
-    route_field_hints = extract_ui_route_field_hints(text)
+    route_field_hints = extract_ui_route_field_hints(text, variable_routes, function_routes)
     used_fields = sorted({field for fields in route_field_hints.values() for field in fields})
     hints: list[dict] = []
     for component_name in component_names:
@@ -1260,14 +1284,15 @@ def extract_api_contract_hints_from_python(
             hinted_fields = set(response_fields)
             if model_name:
                 hinted_fields.update(model_fields.get(model_name, []))
-            route_signature = f"{decorator['method']} {decorator['path']}"
+            normalized_path = normalize_api_hint_path(decorator["path"])
+            route_signature = build_api_route_signature(decorator["method"], normalized_path)
             hints.append(
                 {
-                    "id": build_hint_id("api", relative_path, route_signature),
+                    "id": build_api_hint_id(relative_path, decorator["method"], normalized_path),
                     "label": route_signature,
                     "method": decorator["method"],
                     "route": route_signature,
-                    "path": decorator["path"],
+                    "path": normalized_path,
                     "file": relative_path,
                     "detected_from": "fastapi_ast",
                     "description": f"Detected from {relative_path}",
@@ -3570,19 +3595,221 @@ def dedupe_source_fields(source_fields: list[dict[str, str]]) -> list[dict[str, 
     return deduped
 
 
-def extract_ui_route_field_hints(text: str) -> dict[str, list[str]]:
+def collect_ui_route_definitions(text: str) -> tuple[dict[str, str], dict[str, str]]:
+    variable_routes: dict[str, str] = {}
+    function_routes: dict[str, str] = {}
+    assignments: dict[str, str] = {}
+
+    for name, expr in JS_ASSIGNMENT_RE.findall(text):
+        cleaned = str(expr or "").strip()
+        if not cleaned or "=>" in cleaned:
+            continue
+        assignments[name] = cleaned
+
+    for name, expr in JS_FUNCTION_RETURN_RE.findall(text):
+        route = resolve_ui_route_expression(expr, variable_routes, function_routes)
+        if route:
+            function_routes[name] = route
+    for name, block_expr, inline_expr in JS_ARROW_FUNCTION_RETURN_RE.findall(text):
+        route = resolve_ui_route_expression(block_expr or inline_expr, variable_routes, function_routes)
+        if route:
+            function_routes[name] = route
+
+    for _ in range(4):
+        changed = False
+        for name, expr in assignments.items():
+            route = resolve_ui_route_expression(expr, variable_routes, function_routes)
+            if route and variable_routes.get(name) != route:
+                variable_routes[name] = route
+                changed = True
+        if not changed:
+            break
+
+    return variable_routes, function_routes
+
+
+def collect_ui_call_routes(
+    text: str,
+    variable_routes: dict[str, str],
+    function_routes: dict[str, str],
+) -> list[str]:
+    routes: list[str] = []
+    seen: set[str] = set()
+    for _, expr, _ in iter_ui_call_expressions(text):
+        route = resolve_ui_route_expression(expr, variable_routes, function_routes)
+        if not route or route in seen:
+            continue
+        seen.add(route)
+        routes.append(route)
+    return routes
+
+
+def iter_ui_call_expressions(text: str) -> list[tuple[str, str, int]]:
+    calls: list[tuple[str, str, int]] = []
+    for match in UI_CALL_START_RE.finditer(text):
+        call_name = match.group(1)
+        expr, end_index = parse_js_call_first_argument(text, match.end())
+        if not expr:
+            continue
+        calls.append((call_name, expr, end_index))
+    return calls
+
+
+def parse_js_call_first_argument(text: str, start_index: int) -> tuple[str, int]:
+    depth_paren = 0
+    depth_brace = 0
+    depth_bracket = 0
+    quote = ""
+    escape = False
+    index = start_index
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            depth_paren += 1
+        elif char == ")":
+            if depth_paren == 0 and depth_brace == 0 and depth_bracket == 0:
+                return text[start_index:index].strip(), index
+            if depth_paren > 0:
+                depth_paren -= 1
+        elif char == "{":
+            depth_brace += 1
+        elif char == "}":
+            if depth_brace > 0:
+                depth_brace -= 1
+        elif char == "[":
+            depth_bracket += 1
+        elif char == "]":
+            if depth_bracket > 0:
+                depth_bracket -= 1
+        elif char == "," and depth_paren == 0 and depth_brace == 0 and depth_bracket == 0:
+            return text[start_index:index].strip(), index
+        index += 1
+    return text[start_index:].strip(), len(text)
+
+
+def resolve_ui_route_expression(
+    expression: str,
+    variable_routes: dict[str, str],
+    function_routes: dict[str, str],
+) -> str:
+    candidate = str(expression or "").strip()
+    if not candidate:
+        return ""
+    while candidate.startswith("(") and candidate.endswith(")"):
+        candidate = candidate[1:-1].strip()
+    if candidate.startswith("await "):
+        candidate = candidate[6:].strip()
+
+    literal = unwrap_js_string_literal(candidate)
+    if literal is not None:
+        normalized = normalize_ui_route_candidate(literal)
+        if normalized:
+            return normalized
+
+    function_call_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)", candidate)
+    if function_call_match:
+        route = function_routes.get(function_call_match.group(1), "")
+        if route:
+            return route
+
+    substituted = candidate
+    for _ in range(4):
+        previous = substituted
+        for name, route in function_routes.items():
+            substituted = re.sub(
+                rf"\b{re.escape(name)}\s*\([^)]*\)",
+                route,
+                substituted,
+            )
+        for name, route in variable_routes.items():
+            substituted = substituted.replace(f"${{{name}}}", route)
+            substituted = re.sub(
+                rf"(?<![A-Za-z0-9_$.]){re.escape(name)}(?![A-Za-z0-9_])",
+                route,
+                substituted,
+            )
+        if substituted == previous:
+            break
+
+    normalized = normalize_ui_route_candidate(substituted)
+    if normalized:
+        return normalized
+
+    variable_refs = re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", candidate)
+    bare_refs = re.findall(r"(?<![A-Za-z0-9_$.])([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])", candidate)
+    for name in [*variable_refs, *bare_refs]:
+        route = variable_routes.get(name) or function_routes.get(name)
+        if route:
+            return route
+    return ""
+
+
+def unwrap_js_string_literal(value: str) -> str | None:
+    candidate = str(value or "").strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"'", '"', "`"}:
+        return candidate[1:-1]
+    return None
+
+
+def normalize_ui_route_candidate(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(/api(?:[^\s\"'`,)]*)?)", text)
+    if not match:
+        return ""
+    route = match.group(1).strip()
+    if not route.startswith("/"):
+        route = f"/{route.lstrip('/')}"
+    return re.sub(r"/{2,}", "/", route)
+
+
+def extract_ui_route_field_hints(
+    text: str,
+    variable_routes: dict[str, str] | None = None,
+    function_routes: dict[str, str] | None = None,
+) -> dict[str, list[str]]:
+    variable_routes = variable_routes or {}
+    function_routes = function_routes or {}
     route_by_response_var: dict[str, str] = {}
     route_by_data_var: dict[str, str] = {}
 
-    for variable_name, route in FETCH_RESPONSE_ASSIGN_RE.findall(text):
+    for match in ASYNC_CALL_ASSIGN_RE.finditer(text):
+        variable_name = match.group(1)
+        route_expr, end_index = parse_js_call_first_argument(text, match.end())
+        route = resolve_ui_route_expression(route_expr, variable_routes, function_routes)
+        if not route:
+            continue
         route_by_response_var[variable_name] = route
-    for variable_name, route in AXIOS_RESPONSE_ASSIGN_RE.findall(text):
-        route_by_response_var[variable_name] = route
-    for variable_name, route in FETCH_JSON_CHAIN_ASSIGN_RE.findall(text):
-        route_by_data_var[variable_name] = route
-    for variable_name, route in AXIOS_DATA_ASSIGN_RE.findall(text):
-        route_by_data_var[variable_name] = route
+        trailing = text[end_index:end_index + 160]
+        if ".json(" in trailing:
+            route_by_data_var[variable_name] = route
+
+    for match in AXIOS_DATA_CALL_ASSIGN_RE.finditer(text):
+        variable_name = match.group(1)
+        route_expr, _ = parse_js_call_first_argument(text, match.end())
+        route = resolve_ui_route_expression(route_expr, variable_routes, function_routes)
+        if route:
+            route_by_data_var[variable_name] = route
+
     for variable_name, response_var in JSON_ASSIGN_RE.findall(text):
+        route = route_by_response_var.get(response_var)
+        if route:
+            route_by_data_var[variable_name] = route
+    for variable_name, response_var in RESPONSE_DATA_ASSIGN_RE.findall(text):
         route = route_by_response_var.get(response_var)
         if route:
             route_by_data_var[variable_name] = route
@@ -3660,6 +3887,32 @@ def build_hint_id(prefix: str, relative_path: str, stable_value: str) -> str:
     path_slug = humanize_asset_name(relative_path).replace(" ", "-").lower()
     value_slug = humanize_asset_name(stable_value).replace(" ", "-").lower()
     return f"{prefix}:{path_slug}:{value_slug}"
+
+
+def normalize_api_hint_path(path: str) -> str:
+    normalized = str(path or "").strip()
+    if not normalized:
+        normalized = "/"
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized.lstrip('/')}"
+    normalized = re.sub(r"/{2,}", "/", normalized)
+    return normalized or "/"
+
+
+def build_api_route_signature(method: str, path: str) -> str:
+    return f"{str(method or '').upper()} {normalize_api_hint_path(path)}"
+
+
+def build_api_hint_id(relative_path: str, method: str, path: str) -> str:
+    normalized_path = normalize_api_hint_path(path)
+    readable = slugify_api_hint_readable(f"{str(method or '').lower()} {normalized_path}")
+    digest = hashlib.sha1(f"{relative_path}|{str(method or '').upper()}|{normalized_path}".encode("utf-8")).hexdigest()[:8]
+    return f"api:{readable}:{digest}"
+
+
+def slugify_api_hint_readable(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug or "route"
 
 
 def is_test_path(relative_path: str) -> bool:

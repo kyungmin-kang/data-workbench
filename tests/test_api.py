@@ -1219,6 +1219,7 @@ paths:
         self.assertEqual(payload["root"], str(self.root))
         self.assertEqual(payload["summary"]["profiling_mode"], "metadata_only")
         self.assertEqual(payload["cache"]["profiling_mode"], "metadata_only")
+        self.assertEqual(payload["cache"]["version"], "5")
         self.assertGreaterEqual(payload["summary"]["data_assets"], 1)
         self.assertGreaterEqual(payload["summary"]["import_suggestions"], 1)
         self.assertGreaterEqual(payload["summary"]["api_contract_hints"], 1)
@@ -1297,6 +1298,65 @@ Columns:
         pricing_delta = next(field for field in compute_hint["fields"] if field["name"] == "pricing_delta")
         self.assertEqual(pricing_delta["source_fields"][0]["relation"], "analytics.market_signals")
         self.assertEqual(pricing_delta["source_fields"][0]["column"], "pricing_score")
+
+    def test_project_profile_endpoint_filters_narrative_markdown_headings_from_planning_data_hints(self) -> None:
+        latest_plan_path = self.root / "runtime" / "plans" / "latest.plan.md"
+        latest_plan_path.write_text(
+            """
+## Data Flow
+This is narrative text about orchestration.
+
+## Data Ingestion Scripts
+These scripts fetch data from providers.
+
+## Data Quality Notes
+These are process notes for analysts.
+
+## Table: analytics.market_signals
+Columns:
+- pricing_score (float)
+- market (string)
+""".strip(),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        relations = {hint["relation"] for hint in payload["planning_data_hints"]}
+        self.assertIn("analytics.market_signals", relations)
+        self.assertNotIn("Flow", relations)
+        self.assertNotIn("Ingestion Scripts", relations)
+        self.assertNotIn("Quality Notes", relations)
+
+    def test_project_profile_endpoint_keeps_json_partial_graph_data_hints_without_columns(self) -> None:
+        docs_dir = self.root / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        (docs_dir / "plan_graph.json").write_text(
+            json.dumps(
+                {
+                    "metadata": {"name": "Plan Graph"},
+                    "nodes": [
+                        {
+                            "id": "data:analytics_market_signals",
+                            "kind": "data",
+                            "extension_type": "table",
+                            "label": "Market Signals",
+                            "tags": ["sql_relation:analytics.market_signals"],
+                            "columns": [],
+                        }
+                    ],
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/api/project/profile", params={"include_internal": "false"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        relations = {hint["relation"] for hint in payload["planning_data_hints"]}
+        self.assertIn("analytics.market_signals", relations)
 
     def test_project_profile_endpoint_accepts_custom_root_path(self) -> None:
         nested_root = self.root / "examples" / "nested"
