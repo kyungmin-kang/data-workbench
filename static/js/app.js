@@ -71,6 +71,7 @@ const state = {
     rootPath: "",
     profilingMode: "metadata_only",
     excludePathsText: "",
+    assetRootsText: "",
     agentEnrichAfterScan: false,
   },
   projectBootstrapOptions: {

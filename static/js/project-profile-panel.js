@@ -56,7 +56,7 @@ function renderProjectProfile() {
   const selectedOrmHints = new Set(state.selectedProjectOrmHints || []);
   const selectableCount = dataAssets.filter((asset) => asset.suggested_import).length;
   const bootstrapCount = (
-    (state.projectBootstrapOptions.assets ? (selectedPaths.size || selectableCount) : 0)
+    (state.projectBootstrapOptions.assets ? selectedPaths.size : 0)
     + (state.projectBootstrapOptions.apiHints ? (selectedApiHints.size || apiHints.length) : 0)
     + (state.projectBootstrapOptions.uiHints ? (selectedUiHints.size || uiHints.length) : 0)
     + (state.projectBootstrapOptions.sqlHints ? (selectedSqlHints.size || sqlHints.length) : 0)
@@ -223,6 +223,10 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
           Exclude paths
           <textarea data-project-profile-text="excludePathsText" placeholder="raw&#10;warehouse&#10;tmp">${escapeHtml(state.projectProfileOptions.excludePathsText || "")}</textarea>
         </label>
+        <label class="form-field form-field-full">
+          Target asset roots
+          <textarea data-project-profile-text="assetRootsText" placeholder="data/raw&#10;landing&#10;exports/monthly">${escapeHtml(state.projectProfileOptions.assetRootsText || "")}</textarea>
+        </label>
       </div>
       <div class="chip-row">
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="assets" ${state.projectBootstrapOptions.assets ? "checked" : ""} /> bootstrap assets</label>
@@ -232,7 +236,7 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
         <label class="hint"><input type="checkbox" data-project-bootstrap-option="ormHints" ${state.projectBootstrapOptions.ormHints ? "checked" : ""} /> bootstrap ORM hints</label>
       </div>
       <p class="hint">${escapeHtml(bootstrapSummary)}</p>
-      <p class="hint">Default huge-repo path: run metadata-only discovery first, bootstrap from backend/docs, then profile only selected assets.</p>
+      <p class="hint">Default huge-repo path: run metadata-only discovery first, keep the main scan narrow, add targeted asset roots for raw files, then profile only selected assets.</p>
       ${cacheSummary ? `<p class="hint">${escapeHtml(cacheSummary)}</p>` : ""}
       ${skippedHeavyHintFiles ? `<p class="hint">Skipped ${formatValue(skippedHeavyHintFiles)} oversized or generated files during hint discovery to keep large-repo scans responsive.</p>` : ""}
       ${notes.map((note) => `<p class="hint">${escapeHtml(note)}</p>`).join("")}
@@ -2052,6 +2056,7 @@ async function startProjectAssetProfileJob(assetPaths) {
         profile_token: state.projectProfile?.cache?.token || "",
         asset_paths: selected,
         exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+        asset_roots: parseMultilineList(state.projectProfileOptions.assetRootsText),
       }),
     });
     payload = await response.json();
@@ -2124,6 +2129,7 @@ async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
     state.projectProfileOptions.rootPath = state.projectProfile?.root || context.rootPath || "";
     state.projectProfileOptions.profilingMode = context.profilingMode || state.projectProfileOptions.profilingMode;
     state.projectProfileOptions.excludePathsText = context.excludePathsText ?? state.projectProfileOptions.excludePathsText;
+    state.projectProfileOptions.assetRootsText = context.assetRootsText ?? state.projectProfileOptions.assetRootsText;
     resetProjectProfilePages();
     if (context.preset) {
       applyProjectPresetSelections(context.preset);
@@ -2158,6 +2164,7 @@ async function loadProjectProfileWithOptions(options = {}) {
   const rootPath = options.rootPath ?? state.projectProfileOptions.rootPath;
   const profilingMode = options.profilingMode ?? state.projectProfileOptions.profilingMode;
   const excludePaths = parseMultilineList(options.excludePathsText ?? state.projectProfileOptions.excludePathsText);
+  const assetRoots = parseMultilineList(options.assetRootsText ?? state.projectProfileOptions.assetRootsText);
   state.projectProfileJob = {
     status: "queued",
     progress: {
@@ -2183,6 +2190,7 @@ async function loadProjectProfileWithOptions(options = {}) {
         profile_token: state.projectProfile?.cache?.token || "",
         profiling_mode: profilingMode || "metadata_only",
         exclude_paths: excludePaths,
+        asset_roots: assetRoots,
       }),
     });
     payload = await response.json();
@@ -2208,6 +2216,7 @@ async function loadProjectProfileWithOptions(options = {}) {
     rootPath,
     profilingMode,
     excludePathsText: options.excludePathsText ?? state.projectProfileOptions.excludePathsText,
+    assetRootsText: options.assetRootsText ?? state.projectProfileOptions.assetRootsText,
     preset: options.preset,
   });
 }
@@ -2253,6 +2262,7 @@ async function applySelectedProjectPreset() {
   state.projectProfileOptions.rootPath = preset.root || state.projectProfileOptions.rootPath;
   state.projectProfileOptions.profilingMode = preset.profiling_mode || "metadata_only";
   state.projectProfileOptions.excludePathsText = (preset.exclude_paths || []).join("\n");
+  state.projectProfileOptions.assetRootsText = (preset.asset_roots || []).join("\n");
   state.projectProfileOptions.agentEnrichAfterScan = preset.agent_enrich_after_scan === true;
   state.projectBootstrapOptions = {
     assets: preset.bootstrap_options?.assets !== false,
@@ -2268,6 +2278,7 @@ async function applySelectedProjectPreset() {
     rootPath: preset.root || state.projectProfileOptions.rootPath,
     profilingMode: preset.profiling_mode || "metadata_only",
     excludePathsText: (preset.exclude_paths || []).join("\n"),
+    assetRootsText: (preset.asset_roots || []).join("\n"),
     preset,
   });
   setStatus("Preset applied", `${preset.name} is now loaded into the onboarding wizard.`);
@@ -2303,6 +2314,7 @@ async function saveCurrentProjectPreset() {
     include_tests: state.projectProfileOptions.includeTests,
     include_internal: state.projectProfileOptions.includeInternal,
     exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+    asset_roots: parseMultilineList(state.projectProfileOptions.assetRootsText),
     profiling_mode: state.projectProfileOptions.profilingMode || "metadata_only",
     agent_enrich_after_scan: state.projectProfileOptions.agentEnrichAfterScan === true,
     bootstrap_options: { ...state.projectBootstrapOptions },

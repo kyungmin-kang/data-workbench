@@ -20,6 +20,7 @@ from .project_profiler_support import (
     build_project_profile_cache_token,
     get_project_profile_cache_path,
     load_cached_project_profile,
+    normalize_project_profile_asset_roots,
     normalize_project_profile_exclude_paths,
 )
 from .store import (
@@ -326,6 +327,7 @@ def inspect_project_root(
     include_internal: bool,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     requested_path = str(root_path or "").strip()
     if not requested_path:
@@ -351,10 +353,14 @@ def inspect_project_root(
         "include_tests": include_tests,
         "include_internal": include_internal,
         "exclude_paths": [],
+        "asset_roots": [],
     }
     if exists and is_directory:
         normalized_excludes = [
             str(path) for path in normalize_project_profile_exclude_paths(resolved_path, exclude_paths)
+        ]
+        normalized_asset_roots = [
+            str(path) for path in normalize_project_profile_asset_roots(resolved_path, asset_roots)
         ]
         token = build_project_profile_cache_token(
             resolved_path,
@@ -362,6 +368,7 @@ def inspect_project_root(
             include_internal=include_internal,
             profiling_mode=profiling_mode,
             exclude_paths=normalized_excludes,
+            asset_roots=normalized_asset_roots,
         )
         cached = load_cached_project_profile(token)
         cache_info = {
@@ -373,6 +380,7 @@ def inspect_project_root(
             "include_tests": include_tests,
             "include_internal": include_internal,
             "exclude_paths": normalized_excludes,
+            "asset_roots": normalized_asset_roots,
         }
     return {
         "requested_path": requested_path,

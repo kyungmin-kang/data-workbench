@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .store import get_cache_dir
 
-PROJECT_PROFILE_CACHE_VERSION = "6"
+PROJECT_PROFILE_CACHE_VERSION = "7"
 DEFAULT_IGNORED_PARTS = {
     ".git",
     ".venv",
@@ -73,12 +73,37 @@ def normalize_project_profile_exclude_paths(root_dir: Path, exclude_paths: list[
     return roots
 
 
+def normalize_project_profile_asset_roots(root_dir: Path, asset_roots: list[str] | None = None) -> list[Path]:
+    raw_entries = [str(entry or "").strip() for entry in (asset_roots or [])]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        if not entry:
+            continue
+        path = Path(entry).expanduser()
+        path = (root_dir / path).resolve() if not path.is_absolute() else path.resolve()
+        normalized = str(path)
+        if normalized in seen or not path.exists():
+            continue
+        seen.add(normalized)
+        roots.append(path)
+    return roots
+
+
 def get_project_profile_exclusion_roots(root_dir: Path, exclude_paths: list[str] | None = None) -> list[Path]:
     return normalize_project_profile_exclude_paths(root_dir, exclude_paths)
 
 
 def project_profile_exclusion_signature(root_dir: Path, exclude_paths: list[str] | None = None) -> str:
     roots = get_project_profile_exclusion_roots(root_dir, exclude_paths)
+    if not roots:
+        return ""
+    payload = json.dumps(sorted(str(path) for path in roots))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def project_profile_asset_roots_signature(root_dir: Path, asset_roots: list[str] | None = None) -> str:
+    roots = normalize_project_profile_asset_roots(root_dir, asset_roots)
     if not roots:
         return ""
     payload = json.dumps(sorted(str(path) for path in roots))
@@ -92,6 +117,7 @@ def build_project_profile_cache_token(
     include_internal: bool,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> str:
     payload = json.dumps(
         {
@@ -100,6 +126,7 @@ def build_project_profile_cache_token(
             "include_internal": include_internal,
             "profiling_mode": profiling_mode,
             "exclude_signature": project_profile_exclusion_signature(root_dir, exclude_paths),
+            "asset_roots_signature": project_profile_asset_roots_signature(root_dir, asset_roots),
             "version": PROJECT_PROFILE_CACHE_VERSION,
         },
         sort_keys=True,
@@ -145,11 +172,13 @@ def with_project_profile_cache_metadata(
     include_internal: bool | None = None,
     profiling_mode: str | None = None,
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     profile = deepcopy(project_profile)
     existing_cache = profile.get("cache", {}) if isinstance(profile.get("cache", {}), dict) else {}
     root_dir = Path(profile.get("root") or ".")
     normalized_excludes = [str(path) for path in normalize_project_profile_exclude_paths(root_dir, exclude_paths)]
+    normalized_asset_roots = [str(path) for path in normalize_project_profile_asset_roots(root_dir, asset_roots)]
     cache_token = token or existing_cache.get("token", "")
     profile["cache"] = {
         "token": cache_token,
@@ -160,6 +189,8 @@ def with_project_profile_cache_metadata(
         "profiling_mode": profiling_mode or str(existing_cache.get("profiling_mode", "metadata_only") or "metadata_only"),
         "exclude_paths": normalized_excludes or list(existing_cache.get("exclude_paths", []) or []),
         "exclude_signature": project_profile_exclusion_signature(root_dir, exclude_paths),
+        "asset_roots": normalized_asset_roots or list(existing_cache.get("asset_roots", []) or []),
+        "asset_roots_signature": project_profile_asset_roots_signature(root_dir, asset_roots),
         "path": str(get_project_profile_cache_path(cache_token)) if cache_token else "",
         "version": PROJECT_PROFILE_CACHE_VERSION,
     }
@@ -174,6 +205,7 @@ def profile_cache_matches(
     include_internal: bool,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> bool:
     cache = project_profile.get("cache", {})
     if project_profile.get("root") != str(root_dir):
@@ -183,6 +215,7 @@ def profile_cache_matches(
         and bool(cache.get("include_internal", True)) == include_internal
         and str(cache.get("profiling_mode", "metadata_only") or "metadata_only") == profiling_mode
         and str(cache.get("exclude_signature", "")) == project_profile_exclusion_signature(root_dir, exclude_paths)
+        and str(cache.get("asset_roots_signature", "")) == project_profile_asset_roots_signature(root_dir, asset_roots)
     )
 
 
@@ -234,16 +267,32 @@ def iter_project_files(
             yield path
 
 
+def iter_project_asset_files(root_dir: Path, asset_roots: list[str] | None = None):
+    for asset_root in normalize_project_profile_asset_roots(root_dir, asset_roots):
+        if asset_root.is_file():
+            yield asset_root
+            continue
+        for current_root, dirnames, filenames in os.walk(asset_root):
+            current_root_path = Path(current_root)
+            dirnames[:] = sorted(
+                dirname
+                for dirname in dirnames
+                if not is_ignored_project_dir_name(dirname)
+            )
+            for filename in sorted(filenames):
+                yield current_root_path / filename
+
+
 def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
     parquet_by_dir: dict[str, list[str]] = defaultdict(list)
     grouped_collections: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     direct_entries: list[dict[str, Any]] = []
 
     for path in data_files:
-        relative = path.relative_to(root_dir).as_posix()
+        relative = profile_display_path(root_dir, path)
         fmt, extension = classify_data_asset_path(relative)
         if fmt == "parquet":
-            parquet_by_dir[str(path.relative_to(root_dir).parent).replace("\\", "/")].append(relative)
+            parquet_by_dir[str(Path(relative).parent).replace("\\", "/")].append(relative)
             continue
         collection_key = derive_collection_group_key(relative, fmt)
         if collection_key is not None:
@@ -292,6 +341,13 @@ def group_data_assets(root_dir: Path, data_files: list[Path]) -> list[dict]:
         )
 
     return sorted(direct_entries + grouped_entries, key=lambda item: item["path"] or "")
+
+
+def profile_display_path(root_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root_dir.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def classify_data_asset_path(relative_path: str) -> tuple[str, str]:

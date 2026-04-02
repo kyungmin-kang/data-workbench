@@ -1079,6 +1079,39 @@ class MarketSnapshot(Base):
         nodes = {node["id"]: node for node in payload["graph"]["nodes"]}
         self.assertEqual(nodes[imported_data_id]["data"]["row_count"], 2)
 
+    def test_bulk_import_endpoint_can_skip_asset_profiling(self) -> None:
+        graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
+        sample_path = self.root / "data" / "demo" / "bulk_schema_only.csv"
+        sample_path.write_text("date,value\n2025-01-01,1\n2025-02-01,3\n", encoding="utf-8")
+        response = self.client.post(
+            "/api/import/assets/bulk",
+            json={
+                "graph": graph,
+                "profile_assets": False,
+                "import_specs": [
+                    {
+                        "source_label": "Bulk Schema Asset",
+                        "source_extension_type": "disk_path",
+                        "source_provider": "local",
+                        "raw_asset_label": "Landing copy",
+                        "raw_asset_kind": "file",
+                        "raw_asset_format": "csv",
+                        "raw_asset_value": "data/demo/bulk_schema_only.csv",
+                        "data_label": "Bulk Schema Asset Raw",
+                        "data_extension_type": "raw_dataset",
+                        "persistence": "cold",
+                        "persisted": False,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        nodes = {node["id"]: node for node in payload["graph"]["nodes"]}
+        imported_data_id = payload["imported"][0]["data_node_id"]
+        self.assertEqual(nodes[imported_data_id]["profile_status"], "schema_only")
+        self.assertIsNone(nodes[imported_data_id]["data"]["row_count"])
+
     def test_import_openapi_endpoint_adds_api_contract_nodes_from_inline_yaml(self) -> None:
         graph = json.loads((self.root / "specs" / "workbench.graph.json").read_text(encoding="utf-8"))
         spec_text = """
@@ -1219,7 +1252,7 @@ paths:
         self.assertEqual(payload["root"], str(self.root))
         self.assertEqual(payload["summary"]["profiling_mode"], "metadata_only")
         self.assertEqual(payload["cache"]["profiling_mode"], "metadata_only")
-        self.assertEqual(payload["cache"]["version"], "6")
+        self.assertEqual(payload["cache"]["version"], "7")
         self.assertGreaterEqual(payload["summary"]["data_assets"], 1)
         self.assertGreaterEqual(payload["summary"]["import_suggestions"], 1)
         self.assertGreaterEqual(payload["summary"]["api_contract_hints"], 1)
@@ -1843,6 +1876,26 @@ def per_request_exclude():
         self.assertNotIn("raw/excluded.csv", asset_paths)
         self.assertTrue(payload["cache"]["exclude_paths"])
 
+    def test_project_profile_can_scan_targeted_asset_roots_even_when_excluded_from_main_walk(self) -> None:
+        raw_dir = self.root / "data" / "raw_exports"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / "markets.csv").write_text("market,value\nnyc,1\n", encoding="utf-8")
+
+        response = self.client.get(
+            "/api/project/profile",
+            params=[
+                ("include_internal", "false"),
+                ("exclude_paths", "data"),
+                ("asset_roots", "data/raw_exports"),
+            ],
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["project_profile"]
+        asset_paths = {asset["path"] for asset in payload["data_assets"]}
+        self.assertIn("data/raw_exports/markets.csv", asset_paths)
+        self.assertEqual(payload["cache"]["asset_roots"], [str(raw_dir.resolve())])
+        self.assertGreaterEqual(payload["summary"]["asset_root_files_scanned"], 1)
+
     def test_project_asset_profile_job_profiles_selected_assets_on_demand(self) -> None:
         response = self.client.get("/api/project/profile", params={"include_internal": "false"})
         self.assertEqual(response.status_code, 200)
@@ -2233,7 +2286,8 @@ export async function CustomPricingPanel() {
 
         nodes = {node["id"]: node for node in payload["graph"]["nodes"]}
         imported_data_id = payload["imported"]["asset_imported"][0]["data_node_id"]
-        self.assertEqual(nodes[imported_data_id]["data"]["row_count"], 2)
+        self.assertEqual(nodes[imported_data_id]["profile_status"], "schema_only")
+        self.assertIsNone(nodes[imported_data_id]["data"]["row_count"])
 
         api_node = nodes["contract:api.get--api-custom-pricing"]
         self.assertEqual(api_node["contract"]["route"], "GET /api/custom-pricing")

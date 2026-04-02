@@ -30,9 +30,11 @@ from .project_profiler_support import (
     enrich_sql_orm_hint_evidence,
     group_data_assets,
     is_ignored_project_dir_name,
+    iter_project_asset_files,
     iter_project_files,
     load_cached_project_profile,
     profile_cache_matches,
+    profile_display_path,
     project_profile_exclusion_signature,
     save_cached_project_profile,
     with_project_profile_cache_metadata,
@@ -125,6 +127,7 @@ def profile_project(
     include_internal: bool = True,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict:
     profiling_mode = normalize_profiling_mode(profiling_mode)
@@ -133,6 +136,7 @@ def profile_project(
     docs: list[str] = []
     data_files: list[Path] = []
     files_scanned = 0
+    seen_data_paths: set[str] = set()
 
     for path in iter_project_files(
         root_dir,
@@ -154,7 +158,10 @@ def profile_project(
         if suffix in DOC_SUFFIXES:
             docs.append(relative)
         if suffix in DATA_SUFFIXES:
-            data_files.append(path)
+            resolved = str(path.resolve())
+            if resolved not in seen_data_paths:
+                seen_data_paths.add(resolved)
+                data_files.append(path)
         if progress_callback and (
             files_scanned == 1
             or files_scanned % PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL == 0
@@ -171,6 +178,37 @@ def profile_project(
                     "data_files": len(data_files),
                 }
             )
+
+    normalized_asset_roots = [str(path) for path in (asset_roots or []) if str(path).strip()]
+    additional_asset_files_scanned = 0
+    if normalized_asset_roots:
+        for path in iter_project_asset_files(root_dir, normalized_asset_roots):
+            additional_asset_files_scanned += 1
+            if path.suffix.lower() not in DATA_SUFFIXES:
+                continue
+            resolved = str(path.resolve())
+            if resolved in seen_data_paths:
+                continue
+            seen_data_paths.add(resolved)
+            data_files.append(path)
+            files_scanned += 1
+            if progress_callback and (
+                additional_asset_files_scanned == 1
+                or additional_asset_files_scanned % PROJECT_PROFILE_PROGRESS_REPORT_INTERVAL == 0
+            ):
+                progress_callback(
+                    {
+                        "phase": "walking_asset_roots",
+                        "message": "Walking targeted asset roots.",
+                        "current_path": profile_display_path(root_dir, path),
+                        "files_scanned": files_scanned,
+                        "manifests": len(manifests),
+                        "code_files": len(code_files),
+                        "docs": len(docs),
+                        "data_files": len(data_files),
+                        "asset_root_files_scanned": additional_asset_files_scanned,
+                    }
+                )
 
     progress_base = {
         "files_scanned": files_scanned,
@@ -222,6 +260,11 @@ def profile_project(
         notes.append(
             f"Skipped {code_hint_stats['skipped_heavy_hint_files']} oversized or generated code files during hint discovery."
         )
+    if normalized_asset_roots:
+        notes.append(
+            f"Discovery also walked {len(normalized_asset_roots)} targeted asset root"
+            f"{'' if len(normalized_asset_roots) == 1 else 's'} to record raw assets without widening the main scan."
+        )
     if profiling_mode == "metadata_only" and data_assets:
         notes.append("Discovery used metadata-only asset handling. Run explicit asset profiling to calculate row counts and sampled columns.")
 
@@ -243,6 +286,7 @@ def profile_project(
             "planning_compute_hints": len(planning_hints["planning_compute_hints"]),
             "skipped_heavy_hint_files": code_hint_stats["skipped_heavy_hint_files"],
             "profiling_mode": profiling_mode,
+            "asset_root_files_scanned": additional_asset_files_scanned,
         },
         "manifests": manifests,
         "code_files_sample": code_files[:12],
@@ -268,6 +312,7 @@ def resolve_project_profile(
     force_refresh: bool = False,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     profiling_mode = normalize_profiling_mode(profiling_mode)
@@ -277,6 +322,7 @@ def resolve_project_profile(
         include_internal=include_internal,
         profiling_mode=profiling_mode,
         exclude_paths=exclude_paths,
+        asset_roots=asset_roots,
     )
     candidate_tokens = [token for token in (profile_token, expected_token) if token]
     if not force_refresh:
@@ -289,6 +335,7 @@ def resolve_project_profile(
                 include_internal=include_internal,
                 profiling_mode=profiling_mode,
                 exclude_paths=exclude_paths,
+                asset_roots=asset_roots,
             ):
                 if progress_callback:
                     progress_callback(
@@ -306,6 +353,7 @@ def resolve_project_profile(
         include_internal=include_internal,
         profiling_mode=profiling_mode,
         exclude_paths=exclude_paths,
+        asset_roots=asset_roots,
         progress_callback=progress_callback,
     )
     generated_at = utc_timestamp()
@@ -318,6 +366,7 @@ def resolve_project_profile(
         include_internal=include_internal,
         profiling_mode=profiling_mode,
         exclude_paths=exclude_paths,
+        asset_roots=asset_roots,
     )
     save_cached_project_profile(cached_profile)
     return cached_profile
@@ -488,6 +537,7 @@ def start_project_profile_job(
     force_refresh: bool = False,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     profiling_mode = normalize_profiling_mode(profiling_mode)
     job_id = uuid.uuid4().hex[:12]
@@ -506,6 +556,7 @@ def start_project_profile_job(
             "force_refresh": force_refresh,
             "profiling_mode": profiling_mode,
             "exclude_paths": list(exclude_paths or []),
+            "asset_roots": list(asset_roots or []),
         },
         "progress": {
             "phase": "queued",
@@ -541,6 +592,7 @@ def start_project_profile_job(
                 force_refresh=force_refresh,
                 profiling_mode=profiling_mode,
                 exclude_paths=exclude_paths,
+                asset_roots=asset_roots,
                 progress_callback=update_progress,
             )
         except Exception as error:  # pragma: no cover - defensive job wrapper
@@ -596,6 +648,7 @@ def start_project_asset_profile_job(
     asset_paths: list[str] | None = None,
     asset_ids: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    asset_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     job_id = uuid.uuid4().hex[:12]
     job = {
@@ -613,6 +666,7 @@ def start_project_asset_profile_job(
             "asset_paths": list(asset_paths or []),
             "asset_ids": list(asset_ids or []),
             "exclude_paths": list(exclude_paths or []),
+            "asset_roots": list(asset_roots or []),
         },
         "progress": {
             "phase": "queued",
@@ -649,6 +703,7 @@ def start_project_asset_profile_job(
                 profile_token=profile_token,
                 profiling_mode="metadata_only",
                 exclude_paths=exclude_paths,
+                asset_roots=asset_roots,
             )
             selected_entries = select_project_profile_assets(
                 project_profile,

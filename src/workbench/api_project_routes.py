@@ -27,6 +27,7 @@ def get_project_profile(
     force_refresh: bool = False,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] = Query(default_factory=list),
+    asset_roots: list[str] = Query(default_factory=list),
 ) -> dict[str, Any]:
     root_dir = resolve_profile_root(root_path)
     return {
@@ -37,6 +38,7 @@ def get_project_profile(
             force_refresh=force_refresh,
             profiling_mode=profiling_mode,
             exclude_paths=exclude_paths,
+            asset_roots=asset_roots,
         )
     }
 
@@ -52,6 +54,7 @@ def create_project_profile_job(payload: ProjectProfileJobRequest) -> dict[str, A
         force_refresh=payload.force_refresh,
         profiling_mode=payload.profiling_mode,
         exclude_paths=payload.exclude_paths,
+        asset_roots=payload.asset_roots,
     )
     return {"job": job}
 
@@ -75,6 +78,7 @@ def create_project_asset_profile_job(payload: ProjectAssetProfileJobRequest) -> 
         asset_paths=payload.asset_paths,
         asset_ids=payload.asset_ids,
         exclude_paths=payload.exclude_paths,
+        asset_roots=payload.asset_roots,
     )
     return {"job": job}
 
@@ -102,6 +106,7 @@ def get_project_root_check(
     include_internal: bool = True,
     profiling_mode: str = "metadata_only",
     exclude_paths: list[str] = Query(default_factory=list),
+    asset_roots: list[str] = Query(default_factory=list),
 ) -> dict[str, Any]:
     return {
         "root": inspect_project_root(
@@ -110,6 +115,7 @@ def get_project_root_check(
             include_internal=include_internal,
             profiling_mode=profiling_mode,
             exclude_paths=exclude_paths,
+            asset_roots=asset_roots,
         )
     }
 

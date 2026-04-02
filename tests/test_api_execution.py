@@ -76,7 +76,9 @@ export async function DemoPricingPanel() {
             },
         )
         self.assertEqual(bootstrap_response.status_code, 200)
-        bootstrapped = bootstrap_response.json()["graph"]
+        bootstrap_payload = bootstrap_response.json()
+        bootstrapped = bootstrap_payload["graph"]
+        imported_data_id = bootstrap_payload["imported"]["asset_imported"][0]["data_node_id"]
 
         save_response = self.client.post("/api/graph/save", json={"graph": bootstrapped})
         self.assertEqual(save_response.status_code, 200)
@@ -86,9 +88,7 @@ export async function DemoPricingPanel() {
         imported_contract = next(
             node for node in saved_graph["nodes"] if node["kind"] == "contract" and node.get("contract", {}).get("route") == "GET /api/demo-pricing"
         )
-        imported_data = next(
-            node for node in saved_graph["nodes"] if node["kind"] == "data" and any(column["name"] == "pricing_score" for column in node.get("columns", []))
-        )
+        imported_data = next(node for node in saved_graph["nodes"] if node["id"] == imported_data_id)
 
         plan_state_response = self.client.put(
             "/api/plan-state",

@@ -343,7 +343,7 @@ function describeBootstrapScope({
     parts.push(
       selectedAssetCount
         ? `${selectedAssetCount} selected asset${selectedAssetCount === 1 ? "" : "s"}`
-        : `${selectableCount} suggested asset${selectableCount === 1 ? "" : "s"}`
+        : `${selectableCount} suggested asset${selectableCount === 1 ? "" : "s"} (select explicitly to import)`
     );
   }
   if (state.projectBootstrapOptions.apiHints) {

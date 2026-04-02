@@ -24,6 +24,7 @@ class OnboardingPreset(BaseModel):
     include_tests: bool = False
     include_internal: bool = True
     exclude_paths: list[str] = Field(default_factory=list)
+    asset_roots: list[str] = Field(default_factory=list)
     profiling_mode: str = "metadata_only"
     agent_enrich_after_scan: bool = False
     bootstrap_options: OnboardingBootstrapOptions = Field(default_factory=OnboardingBootstrapOptions)

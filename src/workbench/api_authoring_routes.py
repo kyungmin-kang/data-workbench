@@ -36,7 +36,7 @@ def import_asset_endpoint(payload: AssetImportRequest) -> dict[str, Any]:
         reject_agent_canonical_write(payload.actor_type, "import assets into canonical structure")
         graph = validate_graph(payload.graph)
         root_dir = resolve_profile_root(payload.root_path)
-        imported = import_asset_into_graph(graph, payload.import_spec, root_dir)
+        imported = import_asset_into_graph(graph, payload.import_spec, root_dir, profile_assets=payload.profile_assets)
         updated_graph = imported["graph"]
         analysis = analyze_graph(updated_graph)
         return {
@@ -56,7 +56,7 @@ def import_assets_bulk_endpoint(payload: BulkAssetImportRequest) -> dict[str, An
         reject_agent_canonical_write(payload.actor_type, "bulk import assets into canonical structure")
         graph = validate_graph(payload.graph)
         root_dir = resolve_profile_root(payload.root_path)
-        imported = import_assets_into_graph(graph, payload.import_specs, root_dir)
+        imported = import_assets_into_graph(graph, payload.import_specs, root_dir, profile_assets=payload.profile_assets)
         updated_graph = imported["graph"]
         analysis = analyze_graph(updated_graph)
         return {
@@ -133,6 +133,7 @@ def import_project_hint_endpoint(payload: ProjectHintImportRequest) -> dict[str,
             profile_token=payload.profile_token,
             profiling_mode=payload.profiling_mode,
             exclude_paths=payload.exclude_paths,
+            asset_roots=payload.asset_roots,
         )
         if payload.hint_kind == "api":
             hint = next(
@@ -200,6 +201,7 @@ def import_project_bootstrap_endpoint(payload: ProjectBootstrapRequest) -> dict[
             profile_token=payload.profile_token,
             profiling_mode=payload.profiling_mode,
             exclude_paths=payload.exclude_paths,
+            asset_roots=payload.asset_roots,
         )
         imported = bootstrap_project_into_graph(
             graph,

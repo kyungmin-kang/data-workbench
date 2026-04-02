@@ -673,7 +673,13 @@ function buildAuthoringImportSpec() {
 }
 
 async function runImportAsset(importSpec, options = {}) {
-  setStatus("Importing asset...", "Creating source/data objects and profiling the asset when it is accessible.");
+  const shouldProfile = options.profileAssets === true;
+  setStatus(
+    "Importing asset...",
+    shouldProfile
+      ? "Creating source/data objects and profiling the asset when it is accessible."
+      : "Creating source/data objects without profiling the asset yet.",
+  );
   const previousGraph = cloneGraph();
   const response = await fetch("/api/import/asset", {
     method: "POST",
@@ -682,6 +688,7 @@ async function runImportAsset(importSpec, options = {}) {
       graph: state.graph,
       import_spec: importSpec,
       root_path: state.projectProfileOptions.rootPath || "",
+      profile_assets: shouldProfile,
     }),
   });
   const payload = await response.json();
@@ -708,7 +715,7 @@ async function runImportAsset(importSpec, options = {}) {
   render();
   setStatus(
     "Asset imported",
-    `${payload.imported?.source_node_id || "source"} and ${payload.imported?.data_node_id || "data"} were added locally.`
+    `${payload.imported?.source_node_id || "source"} and ${payload.imported?.data_node_id || "data"} were added locally${shouldProfile ? " with profiling" : ""}.`
   );
 }
 
@@ -726,7 +733,7 @@ async function importSelectedProjectSuggestions() {
     return;
   }
 
-  setStatus("Importing selected assets...", "Creating source/data objects and profiling accessible assets in one pass.");
+  setStatus("Importing selected assets...", "Creating source/data objects without profiling them yet.");
   const previousGraph = cloneGraph();
   const response = await fetch("/api/import/assets/bulk", {
     method: "POST",
@@ -735,6 +742,7 @@ async function importSelectedProjectSuggestions() {
       graph: state.graph,
       import_specs: importSpecs,
       root_path: state.projectProfileOptions.rootPath || "",
+      profile_assets: false,
     }),
   });
   const payload = await response.json();
@@ -759,7 +767,7 @@ async function importSelectedProjectSuggestions() {
   render();
   setStatus(
     "Bulk import complete",
-    `${(payload.imported || []).length} asset${(payload.imported || []).length === 1 ? "" : "s"} imported, ${(payload.skipped || []).length} skipped as existing.`
+    `${(payload.imported || []).length} raw asset object${(payload.imported || []).length === 1 ? "" : "s"} imported, ${(payload.skipped || []).length} skipped as existing.`
   );
 }
 
@@ -778,8 +786,7 @@ async function importProjectBootstrap() {
   const uiHintIds = selectedUiHints;
   const sqlHintIds = selectedSqlHints;
   const ormHintIds = selectedOrmHints;
-  const importAssets = state.projectBootstrapOptions.assets
-    && (selectedPaths.length > 0 || (state.projectProfile.data_assets || []).some((asset) => asset.suggested_import));
+  const importAssets = state.projectBootstrapOptions.assets && selectedPaths.length > 0;
   const importApiHints = state.projectBootstrapOptions.apiHints
     && (selectedApiHints.length > 0 || (state.projectProfile.api_contract_hints || []).length > 0);
   const importUiHints = state.projectBootstrapOptions.uiHints
@@ -794,7 +801,7 @@ async function importProjectBootstrap() {
     return;
   }
 
-  setStatus("Bootstrapping graph...", "Importing discovered data assets, contracts, and structure hints into the current graph.");
+  setStatus("Bootstrapping graph...", "Importing selected raw assets as objects and applying discovered structure hints into the current graph.");
   const previousGraph = cloneGraph();
   const response = await fetch("/api/import/project-bootstrap", {
     method: "POST",
@@ -805,6 +812,9 @@ async function importProjectBootstrap() {
       include_internal: state.projectProfileOptions.includeInternal,
       profile_token: state.projectProfile?.cache?.token || "",
       root_path: state.projectProfileOptions.rootPath || "",
+      profiling_mode: state.projectProfileOptions.profilingMode || "metadata_only",
+      exclude_paths: parseMultilineList(state.projectProfileOptions.excludePathsText),
+      asset_roots: parseMultilineList(state.projectProfileOptions.assetRootsText),
       asset_paths: selectedPaths,
       api_hint_ids: apiHintIds,
       ui_hint_ids: uiHintIds,
@@ -853,7 +863,7 @@ async function importProjectBootstrap() {
   render();
   setStatus(
     "Graph bootstrap complete",
-    `${(payload.imported?.asset_imported || []).length} assets imported, ${(payload.imported?.asset_skipped || []).length} skipped, ${(payload.imported?.api_created || []).length + (payload.imported?.api_updated || []).length} API contracts touched, ${(payload.imported?.ui_created || []).length + (payload.imported?.ui_updated || []).length} UI contracts touched, ${(payload.imported?.sql_created || []).length + (payload.imported?.sql_updated || []).length} SQL nodes touched, ${(payload.imported?.orm_created || []).length + (payload.imported?.orm_updated || []).length} ORM nodes touched.`
+    `${(payload.imported?.asset_imported || []).length} raw asset object${(payload.imported?.asset_imported || []).length === 1 ? "" : "s"} imported, ${(payload.imported?.asset_skipped || []).length} skipped, ${(payload.imported?.api_created || []).length + (payload.imported?.api_updated || []).length} API contracts touched, ${(payload.imported?.ui_created || []).length + (payload.imported?.ui_updated || []).length} UI contracts touched, ${(payload.imported?.sql_created || []).length + (payload.imported?.sql_updated || []).length} SQL nodes touched, ${(payload.imported?.orm_created || []).length + (payload.imported?.orm_updated || []).length} ORM nodes touched.`
   );
 }
 

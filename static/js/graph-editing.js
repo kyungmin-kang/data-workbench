@@ -1210,6 +1210,9 @@ async function inspectProjectRootPath(path) {
   for (const entry of parseMultilineList(state.projectProfileOptions.excludePathsText || "")) {
     params.append("exclude_paths", entry);
   }
+  for (const entry of parseMultilineList(state.projectProfileOptions.assetRootsText || "")) {
+    params.append("asset_roots", entry);
+  }
   const response = await fetch(`/api/project/root-check?${params.toString()}`);
   const payload = await response.json();
   if (!response.ok) {

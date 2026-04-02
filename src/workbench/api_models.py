@@ -58,6 +58,7 @@ class AssetImportRequest(BaseModel):
     graph: dict[str, Any]
     import_spec: AssetImportSpec
     root_path: str | None = None
+    profile_assets: bool = True
     actor_type: Literal["human", "agent"] = "human"
 
 
@@ -72,6 +73,7 @@ class BulkAssetImportRequest(BaseModel):
     graph: dict[str, Any]
     import_specs: list[AssetImportSpec]
     root_path: str | None = None
+    profile_assets: bool = True
     actor_type: Literal["human", "agent"] = "human"
 
 
@@ -96,6 +98,7 @@ class ProjectHintImportRequest(BaseModel):
     include_internal: bool = True
     profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
     exclude_paths: list[str] = []
+    asset_roots: list[str] = []
     actor_type: Literal["human", "agent"] = "human"
 
 
@@ -107,6 +110,7 @@ class ProjectBootstrapRequest(BaseModel):
     root_path: str | None = None
     profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
     exclude_paths: list[str] = []
+    asset_roots: list[str] = []
     asset_paths: list[str] = []
     api_hint_ids: list[str] = []
     ui_hint_ids: list[str] = []
@@ -132,6 +136,7 @@ class ProjectProfileJobRequest(BaseModel):
     profile_token: str | None = None
     profiling_mode: Literal["metadata_only", "profile_assets"] = "metadata_only"
     exclude_paths: list[str] = []
+    asset_roots: list[str] = []
 
 
 class ProjectAssetProfileJobRequest(BaseModel):
@@ -142,6 +147,7 @@ class ProjectAssetProfileJobRequest(BaseModel):
     asset_paths: list[str] = []
     asset_ids: list[str] = []
     exclude_paths: list[str] = []
+    asset_roots: list[str] = []
 
 
 class StructureImportRequest(BaseModel):

@@ -63,11 +63,17 @@ class AssetImportSpec(BaseModel):
     schema_columns: list[ImportSchemaColumn] = Field(default_factory=list)
 
 
-def import_asset_into_graph(graph: dict[str, Any], spec: AssetImportSpec | dict[str, Any], root_dir: Path) -> dict[str, Any]:
+def import_asset_into_graph(
+    graph: dict[str, Any],
+    spec: AssetImportSpec | dict[str, Any],
+    root_dir: Path,
+    *,
+    profile_assets: bool = True,
+) -> dict[str, Any]:
     parsed = spec if isinstance(spec, AssetImportSpec) else AssetImportSpec.model_validate(spec)
     updated = deepcopy(graph)
     inserted = _insert_asset_nodes(updated, parsed)
-    profiled = profile_graph(updated, root_dir)
+    profiled = profile_graph(updated, root_dir) if profile_assets else updated
     validated = validate_graph(profiled)
     return {
         "graph": validated,
@@ -76,7 +82,11 @@ def import_asset_into_graph(graph: dict[str, Any], spec: AssetImportSpec | dict[
 
 
 def import_assets_into_graph(
-    graph: dict[str, Any], specs: list[AssetImportSpec | dict[str, Any]], root_dir: Path
+    graph: dict[str, Any],
+    specs: list[AssetImportSpec | dict[str, Any]],
+    root_dir: Path,
+    *,
+    profile_assets: bool = True,
 ) -> dict[str, Any]:
     updated = deepcopy(graph)
     imported: list[dict[str, Any]] = []
@@ -96,7 +106,7 @@ def import_assets_into_graph(
             continue
         imported.append(_insert_asset_nodes(updated, parsed))
 
-    profiled = profile_graph(updated, root_dir)
+    profiled = profile_graph(updated, root_dir) if profile_assets else updated
     validated = validate_graph(profiled)
     return {
         "graph": validated,

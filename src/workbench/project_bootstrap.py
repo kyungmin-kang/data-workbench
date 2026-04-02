@@ -64,7 +64,7 @@ def bootstrap_project_into_graph(
         summary["selection"]["asset_paths"] = [asset["path"] for asset in selected_asset_summaries]
         asset_specs = [asset["suggested_import"] for asset in selected_asset_summaries if asset.get("suggested_import")]
         if asset_specs:
-            imported_assets = import_assets_into_graph(updated, asset_specs, root_dir)
+            imported_assets = import_assets_into_graph(updated, asset_specs, root_dir, profile_assets=False)
             updated = imported_assets["graph"]
             summary["asset_imported"] = imported_assets["imported"]
             summary["asset_skipped"] = imported_assets["skipped"]
