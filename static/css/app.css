@@ -1458,6 +1458,43 @@ button.danger-soft {
   gap: 8px;
 }
 
+.directory-picker-status {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-muted, #f8fafc);
+  border: 1px solid var(--line, #e2e8f0);
+}
+
+.directory-picker-status.success,
+.project-root-status-card.success {
+  background: #edfdf5;
+  border-color: #86efac;
+}
+
+.directory-picker-status.error,
+.project-root-status-card.warning {
+  background: #fff7ed;
+  border-color: #fdba74;
+}
+
+#directory-picker-results .column-row.active {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+}
+
+.project-root-status-card {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-muted, #f8fafc);
+  border: 1px solid var(--line, #e2e8f0);
+}
+
+.row-actions.wrap {
+  flex-wrap: wrap;
+}
+
 .overlay-modal-head {
   display: flex;
   align-items: center;

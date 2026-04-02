@@ -469,6 +469,53 @@ def pricing_snapshot(session):
                 timeout=15_000,
             )
 
+    def test_project_discovery_can_check_root_and_reload_saved_discovery(self) -> None:
+        demo_root = self.root / "examples" / "onboarding_wizard_demo"
+        with self.browser_page(viewport={"width": 1680, "height": 1200}) as page:
+            page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")
+
+            page.get_by_text("More").click()
+            page.get_by_role("button", name="Add / Import").click()
+            page.locator("#authoring-drawer").wait_for(timeout=10_000)
+
+            root_input = page.locator('[data-project-profile-root="true"]')
+            root_input.fill(str(demo_root))
+            include_internal = page.locator('[data-project-profile-option="includeInternal"]')
+            if include_internal.is_checked():
+                include_internal.uncheck()
+
+            page.locator('[data-project-rescan="true"]').click()
+            page.wait_for_function(
+                "() => (document.getElementById('status-text')?.textContent || '').includes('Project discovery ready')",
+                timeout=20_000,
+            )
+
+            page.reload(wait_until="networkidle")
+            page.get_by_text("More").click()
+            page.get_by_role("button", name="Add / Import").click()
+            page.locator("#authoring-drawer").wait_for(timeout=10_000)
+
+            root_input = page.locator('[data-project-profile-root="true"]')
+            root_input.fill(str(demo_root))
+            include_internal = page.locator('[data-project-profile-option="includeInternal"]')
+            if include_internal.is_checked():
+                include_internal.uncheck()
+
+            page.locator('[data-project-root-check="true"]').click()
+            page.wait_for_function(
+                "() => (document.getElementById('status-text')?.textContent || '').includes('Project root ready')",
+                timeout=15_000,
+            )
+            page.locator("#project-profile-summary").get_by_text("Saved discovery available").wait_for(timeout=10_000)
+
+            page.locator('[data-project-load-cached="true"]').click()
+            page.wait_for_function(
+                "() => (document.getElementById('status-text')?.textContent || '').includes('Project discovery ready')",
+                timeout=20_000,
+            )
+            page.locator("#project-profile-summary").get_by_text("Loaded discovery snapshot").wait_for(timeout=10_000)
+            page.locator("#project-profile-summary").get_by_text("Cache file:").wait_for(timeout=10_000)
+
     def test_execution_contract_workflow_can_load_and_launch_guided_run(self) -> None:
         with self.browser_page(viewport={"width": 1680, "height": 1200}) as page:
             page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle")

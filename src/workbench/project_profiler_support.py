@@ -150,8 +150,9 @@ def with_project_profile_cache_metadata(
     existing_cache = profile.get("cache", {}) if isinstance(profile.get("cache", {}), dict) else {}
     root_dir = Path(profile.get("root") or ".")
     normalized_excludes = [str(path) for path in normalize_project_profile_exclude_paths(root_dir, exclude_paths)]
+    cache_token = token or existing_cache.get("token", "")
     profile["cache"] = {
-        "token": token or existing_cache.get("token", ""),
+        "token": cache_token,
         "generated_at": generated_at or existing_cache.get("generated_at", ""),
         "cached": cached,
         "include_tests": include_tests if include_tests is not None else bool(existing_cache.get("include_tests", False)),
@@ -159,6 +160,7 @@ def with_project_profile_cache_metadata(
         "profiling_mode": profiling_mode or str(existing_cache.get("profiling_mode", "metadata_only") or "metadata_only"),
         "exclude_paths": normalized_excludes or list(existing_cache.get("exclude_paths", []) or []),
         "exclude_signature": project_profile_exclusion_signature(root_dir, exclude_paths),
+        "path": str(get_project_profile_cache_path(cache_token)) if cache_token else "",
         "version": PROJECT_PROFILE_CACHE_VERSION,
     }
     return profile

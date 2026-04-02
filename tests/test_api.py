@@ -1571,6 +1571,62 @@ def token_scan_two():
         results = response.json()["directories"]
         self.assertTrue(any(item["path"].endswith("dashboard") for item in results))
 
+    def test_project_directories_endpoint_accepts_exact_path_queries(self) -> None:
+        exact_root = self.root / "examples" / "exact_root"
+        exact_root.mkdir(parents=True, exist_ok=True)
+
+        response = self.client.get(
+            "/api/project/directories",
+            params={"query": str(exact_root), "base_path": str(self.root / "examples")},
+        )
+        self.assertEqual(response.status_code, 200)
+        results = response.json()["directories"]
+        self.assertTrue(any(item["path"] == str(exact_root) for item in results))
+
+    def test_project_root_check_reports_cache_availability(self) -> None:
+        backend_dir = self.root / "backend"
+        backend_dir.mkdir(parents=True, exist_ok=True)
+        routes_path = backend_dir / "root_check_routes.py"
+        routes_path.write_text(
+            "\n".join(
+                [
+                    "from fastapi import APIRouter",
+                    "",
+                    "router = APIRouter()",
+                    "",
+                    "@router.get('/api/root-check')",
+                    "def root_check():",
+                    "    return {'ok': True}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.client.get(
+            "/api/project/profile",
+            params={
+                "root_path": str(self.root),
+                "include_internal": "false",
+                "profiling_mode": "metadata_only",
+            },
+        )
+
+        response = self.client.get(
+            "/api/project/root-check",
+            params={
+                "path": str(self.root),
+                "include_internal": "false",
+                "profiling_mode": "metadata_only",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["root"]
+        self.assertTrue(payload["exists"])
+        self.assertTrue(payload["is_directory"])
+        self.assertTrue(payload["cache"]["available"])
+        self.assertTrue(payload["cache"]["path"].endswith(".json"))
+
     def test_onboarding_preset_endpoints_save_list_and_delete_presets(self) -> None:
         list_response = self.client.get("/api/onboarding/presets")
         self.assertEqual(list_response.status_code, 200)

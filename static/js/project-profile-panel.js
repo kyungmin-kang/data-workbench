@@ -99,12 +99,75 @@ function renderProjectWizardNav() {
   `;
 }
 
+function getEffectiveProjectRoot() {
+  return state.projectProfileOptions.rootPath || state.projectProfile?.root || "";
+}
+
+function renderProjectRootStatus(profile, rootInspection) {
+  const effectiveRoot = getEffectiveProjectRoot();
+  const loadedRoot = profile?.root || "";
+  const loadedCache = profile?.cache || {};
+  const inspectionCache = rootInspection?.cache || {};
+  if (effectiveRoot && loadedRoot && effectiveRoot !== loadedRoot) {
+    return `
+      <div class="project-root-status-card warning">
+        <strong>Loaded results are for a different root</strong>
+        <div class="hint">Current root input: ${escapeHtml(effectiveRoot)}</div>
+        <div class="hint">Loaded discovery: ${escapeHtml(loadedRoot)}</div>
+        <div class="hint">Use <em>Load saved discovery</em> or <em>Run fresh discovery</em> to switch the panel to the current root.</div>
+      </div>
+    `;
+  }
+  if (loadedRoot) {
+    return `
+      <div class="project-root-status-card success">
+        <strong>Loaded discovery snapshot</strong>
+        <div class="hint">${escapeHtml(loadedRoot)}</div>
+        <div class="hint">${escapeHtml(loadedCache.cached ? "Loaded from cache." : "Freshly generated.")}${loadedCache.generated_at ? ` Generated at ${escapeHtml(loadedCache.generated_at)}.` : ""}</div>
+        ${inspectionCache.available ? `<div class="hint">Saved discovery confirmed for this root.</div>` : ""}
+        ${loadedCache.path ? `<div class="hint">Cache file: ${escapeHtml(loadedCache.path)}</div>` : ""}
+      </div>
+    `;
+  }
+  if (rootInspection?.exists && rootInspection?.is_directory) {
+    const resolved = rootInspection.using_workspace_default
+      ? "Current workspace"
+      : rootInspection.resolved_path;
+    return `
+      <div class="project-root-status-card success">
+        <strong>Project root ready</strong>
+        <div class="hint">${escapeHtml(resolved)}</div>
+        <div class="hint">${escapeHtml(inspectionCache.available
+          ? `Saved discovery available${inspectionCache.generated_at ? ` from ${inspectionCache.generated_at}` : ""}.`
+          : "No saved discovery exists yet for this exact scope; run discovery to create one.")}</div>
+        ${inspectionCache.path ? `<div class="hint">Cache file: ${escapeHtml(inspectionCache.path)}</div>` : ""}
+      </div>
+    `;
+  }
+  if (effectiveRoot && rootInspection && (!rootInspection.exists || !rootInspection.is_directory)) {
+    return `
+      <div class="project-root-status-card warning">
+        <strong>Project root not confirmed</strong>
+        <div class="hint">${escapeHtml(effectiveRoot)} is not available as a directory from this workbench session.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="project-root-status-card">
+      <strong>No discovery loaded yet</strong>
+      <div class="hint">Paste a project path, check that it resolves, then load saved discovery or run a fresh scan.</div>
+    </div>
+  `;
+}
+
 function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootstrapCount) {
   const presets = state.onboardingPresets || [];
   const cacheMeta = profile?.cache || {};
   const discoveryJob = state.projectProfileJob;
   const discoveryRunning = isProjectProfileJobActive(discoveryJob);
   const discoveryEmoji = getProjectDiscoveryPhaseEmoji(discoveryJob?.progress?.phase);
+  const effectiveRoot = getEffectiveProjectRoot();
+  const rootInspection = state.projectRootInspection;
   const cacheSummary = cacheMeta.generated_at
     ? `${cacheMeta.cached ? "Loaded cached discovery" : "Fresh discovery"} from ${cacheMeta.generated_at}`
     : "";
@@ -114,20 +177,27 @@ function renderProjectWizardScopeStep(profile, summary, bootstrapSummary, bootst
     <div class="section">
       <div class="section-actions">
         <h3>Step 1. Discovery Scope</h3>
-        <button class="ghost-button" type="button" data-project-rescan="true" ${discoveryRunning ? "disabled" : ""}>${discoveryRunning ? `${discoveryEmoji} Discovering...` : profile ? "Rescan project" : "Run discovery"}</button>
+        <div class="row-actions">
+          <button class="ghost-button" type="button" data-project-load-cached="true" ${discoveryRunning ? "disabled" : ""}>${discoveryRunning ? `${discoveryEmoji} Discovering...` : "Load saved discovery"}</button>
+          <button class="ghost-button" type="button" data-project-rescan="true" ${discoveryRunning ? "disabled" : ""}>Run fresh discovery</button>
+        </div>
       </div>
       ${renderProjectDiscoveryProgress(discoveryJob)}
+      ${renderProjectRootStatus(profile, rootInspection)}
       <div class="form-grid">
         <label class="form-field form-field-full">
           Project root
           <input data-project-profile-root="true" value="${escapeHtml(state.projectProfileOptions.rootPath || "")}" placeholder="${escapeHtml(state.projectProfile?.root || "") || "/path/to/project"}" />
         </label>
         <div class="form-field">
-          Browse
-          <button class="ghost-button" type="button" data-project-root-picker="true">Search directories</button>
+          Root actions
+          <div class="row-actions wrap">
+            <button class="ghost-button" type="button" data-project-root-check="true">Check root</button>
+            <button class="ghost-button" type="button" data-project-root-picker="true">Search directories</button>
+          </div>
         </div>
       </div>
-      ${state.projectProfileOptions.rootPath ? `<p class="hint">Current root: ${escapeHtml(state.projectProfileOptions.rootPath)}</p>` : ""}
+      ${effectiveRoot ? `<p class="hint">Current root input: ${escapeHtml(effectiveRoot)}</p>` : ""}
       <div class="chip-row">
         <label class="hint"><input type="checkbox" data-project-profile-option="includeTests" ${state.projectProfileOptions.includeTests ? "checked" : ""} /> include tests</label>
         <label class="hint"><input type="checkbox" data-project-profile-option="includeInternal" ${state.projectProfileOptions.includeInternal ? "checked" : ""} /> include workbench internals</label>
@@ -1589,6 +1659,29 @@ function parseMultilineList(value) {
     .filter(Boolean);
 }
 
+async function inspectCurrentProjectRoot() {
+  const rootPath = getEffectiveProjectRoot();
+  try {
+    const inspection = await inspectProjectRootPath(rootPath);
+    state.projectRootInspection = inspection;
+    renderProjectProfile();
+    if (inspection?.exists && inspection?.is_directory) {
+      setStatus(
+        "Project root ready",
+        inspection.cache?.available
+          ? `Saved discovery found${inspection.cache.generated_at ? ` from ${inspection.cache.generated_at}` : ""}.`
+          : "The root exists. No saved discovery exists yet for this scope.",
+      );
+      return;
+    }
+    setStatus("Project root not found", "The selected root does not exist or is not a directory.");
+  } catch (error) {
+    state.projectRootInspection = null;
+    renderProjectProfile();
+    setStatus("Project root check failed", error.message || "Unable to inspect the selected project root.");
+  }
+}
+
 function handleProjectProfileClick(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) {
@@ -1695,6 +1788,14 @@ function handleProjectProfileClick(event) {
     loadProjectProfileWithOptions({ forceRefresh: true });
     return;
   }
+  if (target.dataset.projectLoadCached) {
+    loadProjectProfileWithOptions({ forceRefresh: false });
+    return;
+  }
+  if (target.dataset.projectRootCheck) {
+    inspectCurrentProjectRoot();
+    return;
+  }
   if (target.dataset.projectRootPicker) {
     openDirectoryPicker();
     return;
@@ -1739,11 +1840,13 @@ function handleProjectProfileMutation(event) {
   }
   if (target instanceof HTMLSelectElement && target.dataset.projectProfileSelect) {
     state.projectProfileOptions[target.dataset.projectProfileSelect] = target.value;
+    state.projectRootInspection = null;
     renderProjectProfile();
     return;
   }
   if (target instanceof HTMLTextAreaElement && target.dataset.projectProfileText) {
     state.projectProfileOptions[target.dataset.projectProfileText] = target.value;
+    state.projectRootInspection = null;
     return;
   }
   if (!(target instanceof HTMLInputElement)) {
@@ -1751,10 +1854,12 @@ function handleProjectProfileMutation(event) {
   }
   if (target.dataset.projectProfileRoot) {
     state.projectProfileOptions.rootPath = target.value;
+    state.projectRootInspection = null;
     return;
   }
   if (target.dataset.projectProfileOption) {
     state.projectProfileOptions[target.dataset.projectProfileOption] = target.checked;
+    state.projectRootInspection = null;
     renderProjectProfile();
     return;
   }
@@ -1930,6 +2035,16 @@ async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
       return;
     }
     state.projectProfile = job.project_profile || null;
+    state.projectRootInspection = state.projectProfile
+      ? {
+          requested_path: context.rootPath || state.projectProfile.root || "",
+          resolved_path: state.projectProfile.root || context.rootPath || "",
+          exists: Boolean(state.projectProfile.root),
+          is_directory: true,
+          using_workspace_default: !(context.rootPath || state.projectProfile.root),
+          cache: state.projectProfile.cache || {},
+        }
+      : state.projectRootInspection;
     state.projectProfileOptions.includeTests = context.includeTests ?? state.projectProfileOptions.includeTests;
     state.projectProfileOptions.includeInternal = context.includeInternal ?? state.projectProfileOptions.includeInternal;
     state.projectProfileOptions.rootPath = state.projectProfile?.root || context.rootPath || "";
@@ -1945,8 +2060,9 @@ async function pollProjectProfileJobUntilComplete(jobId, context = {}) {
     }
     renderProjectProfile();
     const summary = state.projectProfile?.summary || {};
+    const completionLead = state.projectProfile?.cache?.cached ? "Loaded saved discovery." : "Discovery completed.";
     const completionDetail = `${formatValue(summary.files_scanned || 0)} files walked, ${formatValue(summary.code_files)} code files, ${formatValue(summary.data_assets)} data assets scanned.`;
-    setStatus("✅ Project discovery ready", completionDetail);
+    setStatus("✅ Project discovery ready", `${completionLead} ${completionDetail}`);
     notifyTaskCompletion("Project discovery ready", completionDetail, {
       emoji: "✅",
       tag: "project-discovery",

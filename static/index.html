@@ -307,11 +307,14 @@
         <div class="form-grid compact">
           <label class="form-field form-field-full">
             Search directories
-            <input id="directory-picker-query" type="search" placeholder="Type part of a folder name or path" />
+            <input id="directory-picker-query" type="search" placeholder="Paste an absolute path or type part of a folder name" />
           </label>
         </div>
+        <div id="directory-picker-status" class="directory-picker-status hint">Paste a path to validate it directly, or search for nearby folders.</div>
         <div class="section-actions">
           <button id="directory-picker-search" class="ghost-button" type="button">Search</button>
+          <button id="directory-picker-validate" class="ghost-button" type="button">Check typed path</button>
+          <button id="directory-picker-apply" class="inline-button" type="button">Use selected folder</button>
           <button id="directory-picker-use-current" class="ghost-button" type="button">Use current workspace</button>
         </div>
         <div id="directory-picker-results" class="column-list"></div>

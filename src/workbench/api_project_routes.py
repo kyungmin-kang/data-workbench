@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from .api_helpers import resolve_profile_root, search_project_directories
+from .api_helpers import inspect_project_root, resolve_profile_root, search_project_directories
 from .api_models import OnboardingPresetSaveRequest, ProjectAssetProfileJobRequest, ProjectProfileJobRequest
 from .onboarding_presets import delete_onboarding_preset, load_onboarding_presets, save_onboarding_preset
 from .project_profiler import (
@@ -93,6 +93,25 @@ def get_project_directories(
     base_path: str | None = None,
 ) -> dict[str, Any]:
     return {"directories": search_project_directories(base_path, query)}
+
+
+@router.get("/api/project/root-check")
+def get_project_root_check(
+    path: str = "",
+    include_tests: bool = False,
+    include_internal: bool = True,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] = Query(default_factory=list),
+) -> dict[str, Any]:
+    return {
+        "root": inspect_project_root(
+            path,
+            include_tests=include_tests,
+            include_internal=include_internal,
+            profiling_mode=profiling_mode,
+            exclude_paths=exclude_paths,
+        )
+    }
 
 
 @router.get("/api/onboarding/presets")

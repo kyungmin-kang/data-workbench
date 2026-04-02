@@ -51,6 +51,7 @@ const state = {
   projectProfile: null,
   projectProfileJob: null,
   projectAssetProfileJob: null,
+  projectRootInspection: null,
   selectedProjectImports: [],
   selectedProjectApiHints: [],
   selectedProjectUiHints: [],
@@ -128,6 +129,8 @@ const state = {
     query: "",
     results: [],
     loading: false,
+    selectedPath: "",
+    validation: null,
   },
   authoring: buildDefaultAuthoringState(),
   dirty: false,
@@ -204,7 +207,10 @@ const directoryPickerModal = document.getElementById("directory-picker-modal");
 const directoryPickerClose = document.getElementById("directory-picker-close");
 const directoryPickerQuery = document.getElementById("directory-picker-query");
 const directoryPickerSearch = document.getElementById("directory-picker-search");
+const directoryPickerValidate = document.getElementById("directory-picker-validate");
 const directoryPickerUseCurrent = document.getElementById("directory-picker-use-current");
+const directoryPickerApply = document.getElementById("directory-picker-apply");
+const directoryPickerStatus = document.getElementById("directory-picker-status");
 const directoryPickerResults = document.getElementById("directory-picker-results");
 const activeTraceLegend = document.getElementById("active-trace-legend");
 const graphAddObjectButton = document.getElementById("graph-add-object-button");
@@ -417,18 +423,33 @@ function bindEvents() {
   });
   reviewActionModal.addEventListener("click", handleModalBackdropClick);
   directoryPickerClose.addEventListener("click", closeDirectoryPicker);
-  directoryPickerSearch.addEventListener("click", () => searchProjectDirectories());
+  directoryPickerSearch.addEventListener("click", () => searchProjectDirectories({ inspectQuery: true }));
+  directoryPickerValidate.addEventListener("click", () => confirmDirectoryPickerQuery());
   directoryPickerUseCurrent.addEventListener("click", () => {
-    state.projectProfileOptions.rootPath = "";
-    closeDirectoryPicker();
-    renderProjectProfile();
+    applyProjectRootSelection("", {
+      close: true,
+      inspection: {
+        exists: true,
+        is_directory: true,
+        using_workspace_default: true,
+        resolved_path: "",
+        cache: {
+          available: false,
+          generated_at: "",
+          path: "",
+        },
+      },
+      statusTitle: "Project root set",
+      statusDetail: "Using the current workspace as the project root.",
+    });
   });
+  directoryPickerApply.addEventListener("click", () => applyDirectoryPickerSelection());
   directoryPickerModal.addEventListener("click", handleModalBackdropClick);
   directoryPickerResults.addEventListener("click", handleDirectoryPickerClick);
   directoryPickerQuery.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      searchProjectDirectories();
+      searchProjectDirectories({ inspectQuery: true });
     }
   });
 

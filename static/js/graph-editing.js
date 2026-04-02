@@ -1144,14 +1144,42 @@ function renderDirectoryPicker() {
     return;
   }
   directoryPickerQuery.value = state.directoryPicker.query;
+  const validation = state.directoryPicker.validation;
+  const selectedPath = state.directoryPicker.selectedPath || "";
+  if (directoryPickerStatus) {
+    const selectionLabel = selectedPath
+      ? `Selected: ${selectedPath}`
+      : "No folder selected yet.";
+    if (validation?.exists && validation?.is_directory) {
+      const cacheHint = validation.cache?.available
+        ? ` Saved discovery available from ${validation.cache.generated_at || "a previous run"}.`
+        : " No saved discovery found yet for this exact scope.";
+      directoryPickerStatus.textContent = `${selectionLabel} Path confirmed.${cacheHint}`;
+      directoryPickerStatus.className = "directory-picker-status success";
+    } else if (validation && !validation.exists) {
+      directoryPickerStatus.textContent = `${selectionLabel} Path not found yet.`;
+      directoryPickerStatus.className = "directory-picker-status error";
+    } else {
+      directoryPickerStatus.textContent = selectedPath
+        ? `${selectionLabel} Click "Use selected folder" to confirm it as the project root.`
+        : "Paste a path to validate it directly, or search for nearby folders.";
+      directoryPickerStatus.className = "directory-picker-status hint";
+    }
+  }
+  if (directoryPickerApply) {
+    directoryPickerApply.disabled = !selectedPath;
+  }
   directoryPickerResults.innerHTML = state.directoryPicker.loading
     ? "<p class=\"hint\">Searching directories...</p>"
     : state.directoryPicker.results.length
       ? state.directoryPicker.results.map((item) => `
-        <button class="column-row button-reset" type="button" data-directory-pick="${escapeHtml(item.path)}">
+        <button class="column-row button-reset ${selectedPath === item.path ? "active" : ""}" type="button" data-directory-pick="${escapeHtml(item.path)}">
           <div class="column-head">
             <div class="column-main">${escapeHtml(item.name || item.path)}</div>
-            <div class="row-actions"><span class="pill">${escapeHtml(item.path)}</span></div>
+            <div class="row-actions">
+              ${selectedPath === item.path ? "<span class=\"pill\">selected</span>" : ""}
+              <span class="pill">${escapeHtml(item.path)}</span>
+            </div>
           </div>
         </button>
       `).join("")
@@ -1162,8 +1190,10 @@ function openDirectoryPicker() {
   state.directoryPicker.open = true;
   state.directoryPicker.query = state.projectProfileOptions.rootPath || state.projectProfile?.root || "";
   state.directoryPicker.results = [];
+  state.directoryPicker.selectedPath = state.projectProfileOptions.rootPath || state.projectProfile?.root || "";
+  state.directoryPicker.validation = null;
   renderDirectoryPicker();
-  searchProjectDirectories();
+  searchProjectDirectories({ inspectQuery: Boolean(state.directoryPicker.query) });
 }
 
 function closeDirectoryPicker() {
@@ -1171,7 +1201,78 @@ function closeDirectoryPicker() {
   renderDirectoryPicker();
 }
 
-async function searchProjectDirectories() {
+async function inspectProjectRootPath(path) {
+  const params = new URLSearchParams();
+  params.set("path", path || "");
+  params.set("include_tests", state.projectProfileOptions.includeTests ? "true" : "false");
+  params.set("include_internal", state.projectProfileOptions.includeInternal ? "true" : "false");
+  params.set("profiling_mode", state.projectProfileOptions.profilingMode || "metadata_only");
+  for (const entry of parseMultilineList(state.projectProfileOptions.excludePathsText || "")) {
+    params.append("exclude_paths", entry);
+  }
+  const response = await fetch(`/api/project/root-check?${params.toString()}`);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || payload.error || "Unable to inspect this project root.");
+  }
+  return payload.root || null;
+}
+
+function applyProjectRootSelection(path, options = {}) {
+  state.projectProfileOptions.rootPath = path || "";
+  state.projectRootInspection = options.inspection || null;
+  if (options.close) {
+    closeDirectoryPicker();
+  }
+  renderProjectProfile();
+  if (options.statusTitle) {
+    setStatus(options.statusTitle, options.statusDetail || "");
+  }
+}
+
+async function confirmDirectoryPickerQuery() {
+  state.directoryPicker.query = directoryPickerQuery?.value || state.directoryPicker.query;
+  try {
+    const inspection = await inspectProjectRootPath(state.directoryPicker.query);
+    state.directoryPicker.validation = inspection;
+    if (inspection?.exists && inspection?.is_directory) {
+      state.directoryPicker.selectedPath = inspection.using_workspace_default ? "" : inspection.resolved_path;
+      renderDirectoryPicker();
+      setStatus(
+        "Project root ready",
+        inspection.using_workspace_default
+          ? "The current workspace is available as the project root."
+          : `${truncateMiddle(inspection.resolved_path)} is ready to use as the project root.`,
+      );
+      return;
+    }
+    renderDirectoryPicker();
+    setStatus("Project root not found", "The typed path does not exist yet or is not a directory.");
+  } catch (error) {
+    state.directoryPicker.validation = null;
+    renderDirectoryPicker();
+    setStatus("Project root check failed", error.message || "Unable to validate the typed path.");
+  }
+}
+
+function applyDirectoryPickerSelection() {
+  const selectedPath = state.directoryPicker.selectedPath || "";
+  if (!selectedPath && !(state.directoryPicker.validation?.using_workspace_default)) {
+    setStatus("Project root not set", "Select a folder or validate a path before applying it.");
+    return;
+  }
+  const inspection = state.directoryPicker.validation || null;
+  applyProjectRootSelection(selectedPath, {
+    close: true,
+    inspection,
+    statusTitle: "Project root set",
+    statusDetail: selectedPath
+      ? `${truncateMiddle(selectedPath)} is now the active discovery root.`
+      : "Using the current workspace as the project root.",
+  });
+}
+
+async function searchProjectDirectories(options = {}) {
   state.directoryPicker.loading = true;
   state.directoryPicker.query = directoryPickerQuery?.value || state.directoryPicker.query;
   renderDirectoryPicker();
@@ -1193,6 +1294,18 @@ async function searchProjectDirectories() {
     return;
   }
   state.directoryPicker.results = payload.directories || [];
+  if (options.inspectQuery && state.directoryPicker.query) {
+    try {
+      state.directoryPicker.validation = await inspectProjectRootPath(state.directoryPicker.query);
+      if (state.directoryPicker.validation?.exists && state.directoryPicker.validation?.is_directory) {
+        state.directoryPicker.selectedPath = state.directoryPicker.validation.using_workspace_default
+          ? ""
+          : state.directoryPicker.validation.resolved_path;
+      }
+    } catch (error) {
+      state.directoryPicker.validation = null;
+    }
+  }
   renderDirectoryPicker();
 }
 
@@ -1205,9 +1318,20 @@ function handleDirectoryPickerClick(event) {
   if (!(button instanceof HTMLElement)) {
     return;
   }
-  state.projectProfileOptions.rootPath = button.dataset.directoryPick || "";
-  closeDirectoryPicker();
-  renderProjectProfile();
+  state.directoryPicker.selectedPath = button.dataset.directoryPick || "";
+  state.directoryPicker.validation = {
+    requested_path: state.directoryPicker.selectedPath,
+    resolved_path: state.directoryPicker.selectedPath,
+    exists: true,
+    is_directory: true,
+    using_workspace_default: false,
+    cache: state.directoryPicker.validation?.cache || {
+      available: false,
+      generated_at: "",
+      path: "",
+    },
+  };
+  renderDirectoryPicker();
 }
 
 function isPendingBindingTarget(nodeId, fieldName) {
@@ -1549,4 +1673,3 @@ function inferBindingTypeFromNode(node, bindingName) {
   }
   return node.kind === "contract" ? "string" : "derived";
 }
-

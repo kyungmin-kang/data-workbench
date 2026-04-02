@@ -16,6 +16,12 @@ from .execution import (
     utc_timestamp,
 )
 from .project_profiler import is_ignored_project_dir_name
+from .project_profiler_support import (
+    build_project_profile_cache_token,
+    get_project_profile_cache_path,
+    load_cached_project_profile,
+    normalize_project_profile_exclude_paths,
+)
 from .store import (
     describe_artifact_storage,
     get_root_dir,
@@ -259,7 +265,8 @@ def resolve_profile_root(root_path: str | None) -> Path:
 
 def search_project_directories(base_path: str | None, query: str, *, limit: int = 40) -> list[dict[str, str]]:
     root_dir = resolve_profile_root(base_path)
-    normalized_query = query.strip().lower()
+    query_text = query.strip()
+    normalized_query = query_text.lower()
     matches: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -269,6 +276,16 @@ def search_project_directories(base_path: str | None, query: str, *, limit: int 
             return
         seen.add(text)
         matches.append({"path": text, "name": path.name or text})
+
+    if query_text:
+        direct_candidate = Path(query_text).expanduser()
+        if not direct_candidate.is_absolute():
+            direct_candidate = (root_dir / direct_candidate).resolve()
+        try:
+            if direct_candidate.exists() and direct_candidate.is_dir():
+                maybe_add(direct_candidate)
+        except OSError:
+            pass
 
     maybe_add(root_dir)
     if not normalized_query:
@@ -300,3 +317,69 @@ def search_project_directories(base_path: str | None, query: str, *, limit: int 
             if len(matches) >= limit:
                 break
     return matches[:limit]
+
+
+def inspect_project_root(
+    root_path: str | None,
+    *,
+    include_tests: bool,
+    include_internal: bool,
+    profiling_mode: str = "metadata_only",
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    requested_path = str(root_path or "").strip()
+    if not requested_path:
+        resolved_path = get_root_dir().resolve()
+        exists = True
+        is_directory = True
+        using_workspace_default = True
+    else:
+        candidate = Path(requested_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (get_root_dir() / candidate).resolve()
+        resolved_path = candidate
+        exists = candidate.exists()
+        is_directory = candidate.is_dir() if exists else False
+        using_workspace_default = False
+
+    cache_info: dict[str, Any] = {
+        "available": False,
+        "token": "",
+        "path": "",
+        "generated_at": "",
+        "profiling_mode": profiling_mode,
+        "include_tests": include_tests,
+        "include_internal": include_internal,
+        "exclude_paths": [],
+    }
+    if exists and is_directory:
+        normalized_excludes = [
+            str(path) for path in normalize_project_profile_exclude_paths(resolved_path, exclude_paths)
+        ]
+        token = build_project_profile_cache_token(
+            resolved_path,
+            include_tests=include_tests,
+            include_internal=include_internal,
+            profiling_mode=profiling_mode,
+            exclude_paths=normalized_excludes,
+        )
+        cached = load_cached_project_profile(token)
+        cache_info = {
+            "available": cached is not None,
+            "token": token,
+            "path": str(get_project_profile_cache_path(token)),
+            "generated_at": str(cached.get("cache", {}).get("generated_at", "")) if cached else "",
+            "profiling_mode": profiling_mode,
+            "include_tests": include_tests,
+            "include_internal": include_internal,
+            "exclude_paths": normalized_excludes,
+        }
+    return {
+        "requested_path": requested_path,
+        "resolved_path": str(resolved_path),
+        "exists": exists,
+        "is_directory": is_directory,
+        "using_workspace_default": using_workspace_default,
+        "label": resolved_path.name or str(resolved_path),
+        "cache": cache_info,
+    }
